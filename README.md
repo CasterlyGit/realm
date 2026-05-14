@@ -36,10 +36,41 @@ Four archetypes, each genuinely different in silhouette, wings, and ability:
 5. **Beat the FINAL BOSS** — one giant enemy, 2.5× HP, 1.6× size, 1.5× damage
 6. **Chase the score** — kills + orbs build a combo multiplier. Final score shown on the end card.
 
+## 🖐 Hand control (MediaPipe)
+
+You can fly the dragon with your webcam — no keyboard needed. Click **🖐 ENABLE HAND CONTROL** on the dragon-select screen.
+
+| Input | Action |
+|---|---|
+| Hand position (X/Y in webcam frame) | Continuous yaw + pitch (12% deadzone at center) |
+| **✋ Open palm** | Flap thrust |
+| **✊ Closed fist** | Fire breath |
+| **✌ Peace sign** | Trigger R-skill (debounced) |
+
+The pipeline:
+
+```
+webcam ──▶ MediaPipe Hands (GPU) ──▶ 21 landmarks ──▶ finger-extension classifier
+                                                                  │
+                                  ┌───────────────────────────────┤
+                                  ▼                               ▼
+                          continuous yaw/pitch              gesture booleans
+                          (hand X/Y → input axes)           (flap / fire / skill)
+```
+
+On-screen feedback:
+
+- **Webcam preview** (bottom-left) with cyan hand-skeleton overlay
+- **Scouter-style radar** showing hand position as a glowing dot inside concentric rings, with edge glows for active gestures
+- **Live event console** logging each detected gesture with a timestamp
+
+The gesture vocabulary mirrors my companion project **[CasterlyGit/hand-signal](https://github.com/CasterlyGit/hand-signal)** — a Python desktop tool that turns hand gestures into keystrokes for hands-free agent confirmations. `realm` is the browser-side proof that the same six-gesture vocabulary can drive a real-time game, not just yes/no prompts.
+
 ## Built with
 
 - [Three.js](https://threejs.org/) (procedural geometry, no asset downloads)
 - [Vite](https://vite.dev/) for dev + production builds
+- [@mediapipe/tasks-vision](https://developers.google.com/mediapipe/solutions/vision/hand_landmarker) — CDN-loaded, GPU-delegated hand tracking
 - Vanilla JS, no framework
 - Procedural dragons (~80 lines per archetype, flat-shaded, distinct skeletons)
 - THREE.Points + custom shader for fire breath VFX
