@@ -55,8 +55,9 @@ export async function startHandMode(onStatus) {
 
     state.active = true;
     state.initializing = false;
-    document.getElementById('webcam-wrap').classList.add('show');
+    document.getElementById('hand-system').classList.add('show');
     onStatus?.('TRACKING');
+    logEvent('HAND CONTROL ONLINE', '#5dd9ff');
     requestAnimationFrame(detectLoop);
   } catch (err) {
     state.initializing = false;
@@ -71,7 +72,63 @@ export function stopHandMode() {
     for (const t of video.srcObject.getTracks()) t.stop();
     video.srcObject = null;
   }
-  document.getElementById('webcam-wrap')?.classList.remove('show');
+  document.getElementById('hand-system')?.classList.remove('show');
+}
+
+const prev = { fist: false, open: false, peace: false };
+function logEvent(text, color) {
+  const log = document.getElementById('hand-log');
+  if (!log) return;
+  const item = document.createElement('div');
+  item.className = 'hand-log-item';
+  item.style.setProperty('--c', color);
+  const ts = new Date();
+  const time = `${String(ts.getHours()).padStart(2,'0')}:${String(ts.getMinutes()).padStart(2,'0')}:${String(ts.getSeconds()).padStart(2,'0')}`;
+  item.textContent = `${time}  ${text}`;
+  log.prepend(item);
+  while (log.children.length > 6) log.lastChild.remove();
+  setTimeout(() => item.classList.add('fading'), 2200);
+  setTimeout(() => item.remove(), 2900);
+}
+
+function updateRadar() {
+  const dot = document.getElementById('radar-dot');
+  const status = document.getElementById('radar-status');
+  if (!dot) return;
+  if (!state.detected) {
+    dot.classList.add('lost');
+    dot.style.transform = `translate(-50%, -50%)`;
+    if (status) status.textContent = 'NO HAND';
+    setGlow('flap', false);
+    setGlow('fire', false);
+    setGlow('skill', false);
+    setGlow('up', false);
+    setGlow('down', false);
+    return;
+  }
+  dot.classList.remove('lost');
+  const dz = 0.12;
+  const clamp = (v) => Math.max(-1, Math.min(1, v));
+  const dx = clamp(state.x);
+  const dy = clamp(state.y);
+  // 38% radius range so dot stays visibly inside outer ring
+  dot.style.transform = `translate(calc(-50% + ${dx * 38}%), calc(-50% + ${dy * 38}%))`;
+  if (status) {
+    let s = 'CENTERED';
+    if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) s = 'EXTREME';
+    else if (Math.abs(dx) > dz || Math.abs(dy) > dz) s = 'STEERING';
+    status.textContent = s;
+  }
+  setGlow('flap',  state.open);
+  setGlow('fire',  state.fist);
+  setGlow('skill', state.peace);
+  setGlow('up',    dy < -dz);
+  setGlow('down',  dy >  dz);
+}
+
+function setGlow(key, on) {
+  const el = document.querySelector('.radar-glow.g-' + key);
+  if (el) el.classList.toggle('active', on);
 }
 
 function detectLoop() {
@@ -101,7 +158,14 @@ function detectLoop() {
       state.fist = state.open = state.peace = false;
       octx.clearRect(0, 0, overlay.width, overlay.height);
     }
+    if (state.fist && !prev.fist)   logEvent('✊ FIRE BREATH',  '#ff5028');
+    if (state.open && !prev.open)   logEvent('✋ FLAP',         '#7dffb4');
+    if (state.peace && !prev.peace) logEvent('✌ SKILL CAST',   '#ffd23f');
+    prev.fist = state.fist;
+    prev.open = state.open;
+    prev.peace = state.peace;
     updateGestureLabel();
+    updateRadar();
   }
   requestAnimationFrame(detectLoop);
 }

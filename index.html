@@ -18,12 +18,31 @@
       <div id="select-hint">click a dragon to bond · fly to begin</div>
     </div>
 
-    <div id="webcam-wrap">
-      <video id="webcam-video" autoplay playsinline muted></video>
-      <canvas id="webcam-overlay"></canvas>
-      <div id="webcam-info">
-        <div id="gesture-label">—</div>
-        <div id="webcam-legend">✋ flap · ✊ fire · ✌ skill · hand pos = turn / pitch</div>
+    <div id="hand-system">
+      <div id="webcam-wrap">
+        <video id="webcam-video" autoplay playsinline muted></video>
+        <canvas id="webcam-overlay"></canvas>
+        <div id="webcam-info">
+          <div id="gesture-label">—</div>
+          <div id="webcam-legend">✋ flap · ✊ fire · ✌ skill</div>
+        </div>
+      </div>
+      <div id="hand-panel">
+        <div id="hand-radar">
+          <div class="radar-ring r-outer"></div>
+          <div class="radar-ring r-mid"></div>
+          <div class="radar-ring r-inner"></div>
+          <div class="radar-axis horiz"></div>
+          <div class="radar-axis vert"></div>
+          <div class="radar-glow g-up"   data-action="pitchUp"></div>
+          <div class="radar-glow g-down" data-action="pitchDown"></div>
+          <div class="radar-glow g-flap" data-action="flap"></div>
+          <div class="radar-glow g-fire" data-action="fire"></div>
+          <div class="radar-glow g-skill" data-action="skill"></div>
+          <div id="radar-dot"></div>
+          <div id="radar-status">NO HAND</div>
+        </div>
+        <div id="hand-log"></div>
       </div>
     </div>
 
