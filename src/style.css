@@ -101,6 +101,78 @@ html, body {
   line-height: 1.4;
   color: rgba(255, 255, 255, 0.78);
 }
+#hand-toggle {
+  pointer-events: auto;
+  background: linear-gradient(135deg, #1a6bff, #5dd9ff);
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  color: #fff;
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.25em;
+  padding: 10px 24px;
+  border-radius: 30px;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  box-shadow: 0 6px 20px rgba(26, 107, 255, 0.4);
+}
+#hand-toggle:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 28px rgba(93, 217, 255, 0.55);
+}
+#hand-toggle.active {
+  background: linear-gradient(135deg, #5dd9ff, #1fcf6b);
+}
+
+#webcam-wrap {
+  position: fixed;
+  bottom: 24px;
+  left: 24px;
+  z-index: 6;
+  width: 240px;
+  height: 180px;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 2px solid rgba(93, 217, 255, 0.6);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5), 0 0 24px rgba(93, 217, 255, 0.25);
+  display: none;
+  background: #000;
+}
+#webcam-wrap.show { display: block; }
+#webcam-video {
+  width: 100%; height: 100%;
+  object-fit: cover;
+  transform: scaleX(-1);
+}
+#webcam-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%; height: 100%;
+  pointer-events: none;
+}
+#webcam-info {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  padding: 6px 10px 8px;
+  background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  pointer-events: none;
+}
+#gesture-label {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  color: #ffd23f;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.9);
+}
+#webcam-legend {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: rgba(255,255,255,0.75);
+}
+
 #select-hint {
   font-size: 12px;
   letter-spacing: 0.4em;

@@ -14,6 +14,7 @@ import {
 } from './dragon.js';
 import { makeFireBreath, makeSpeedStreaks } from './fx.js';
 import { populateWorld, updatePopulation } from './populate.js';
+import { startHandMode, getHandInput, isHandActive } from './hand.js';
 
 const CRUISE = 40;
 const MAX_SPEED = 90;
@@ -379,6 +380,24 @@ function pickDragon(key) {
 }
 renderCards();
 
+const handToggleBtn = document.getElementById('hand-toggle');
+handToggleBtn.addEventListener('click', () => {
+  if (isHandActive()) return;
+  handToggleBtn.textContent = '🖐  STARTING…';
+  startHandMode((status) => {
+    if (status === 'TRACKING') {
+      handToggleBtn.textContent = '🖐  HAND CONTROL ACTIVE';
+      handToggleBtn.classList.add('active');
+    } else if (status.startsWith('ERROR')) {
+      handToggleBtn.textContent = '🖐  ' + status;
+    } else {
+      handToggleBtn.textContent = '🖐  ' + status;
+    }
+  });
+});
+
+let lastPeaceState = false;
+
 canvas.addEventListener('click', () => {
   if (!selected) return;
   if (!input.pointerLocked) canvas.requestPointerLock();
@@ -453,9 +472,29 @@ function updatePlayer(dt) {
     player.healingT -= dt;
   }
 
-  const pitchAxis = (input.pitchUp ? 1 : 0) - (input.pitchDown ? 1 : 0);
-  const yawAxis   = (input.yawRight ? 1 : 0) - (input.yawLeft ? 1 : 0);
+  let pitchAxis = (input.pitchUp ? 1 : 0) - (input.pitchDown ? 1 : 0);
+  let yawAxis   = (input.yawRight ? 1 : 0) - (input.yawLeft ? 1 : 0);
   const rollAxis  = (input.rollRight ? 1 : 0) - (input.rollLeft ? 1 : 0);
+
+  if (isHandActive()) {
+    const h = getHandInput();
+    if (h.detected) {
+      const dz = 0.12;
+      const sens = 1.8;
+      const hx = Math.abs(h.x) < dz ? 0 : Math.sign(h.x) * Math.min(1, (Math.abs(h.x) - dz) * sens);
+      const hy = Math.abs(h.y) < dz ? 0 : Math.sign(h.y) * Math.min(1, (Math.abs(h.y) - dz) * sens);
+      yawAxis = hx;
+      pitchAxis = -hy;
+      input.flap = h.open;
+      input.fire = h.fist;
+      if (h.peace && !lastPeaceState) activateSkill();
+      lastPeaceState = h.peace;
+    } else {
+      input.flap = false;
+      input.fire = false;
+      lastPeaceState = false;
+    }
+  }
 
   player.pitchSmooth = (player.pitchSmooth || 0);
   player.yawSmooth   = (player.yawSmooth || 0);

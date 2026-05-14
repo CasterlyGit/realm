@@ -14,7 +14,17 @@
     <div id="select-screen">
       <div id="select-title">CHOOSE YOUR DRAGON</div>
       <div id="select-cards"></div>
+      <button id="hand-toggle">🖐  ENABLE HAND CONTROL</button>
       <div id="select-hint">click a dragon to bond · fly to begin</div>
+    </div>
+
+    <div id="webcam-wrap">
+      <video id="webcam-video" autoplay playsinline muted></video>
+      <canvas id="webcam-overlay"></canvas>
+      <div id="webcam-info">
+        <div id="gesture-label">—</div>
+        <div id="webcam-legend">✋ flap · ✊ fire · ✌ skill · hand pos = turn / pitch</div>
+      </div>
     </div>
 
     <div id="hud">
