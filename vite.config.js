@@ -4,6 +4,5 @@ export default defineConfig({
   base: '/realm/',
   build: {
     target: 'es2022',
-    minify: 'esbuild',
   },
 });
