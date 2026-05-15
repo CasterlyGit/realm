@@ -1,19 +1,23 @@
 # Realm
 
-A browser-based dragon-flight combat game. Pick one of four distinct dragon archetypes — each with a unique body, wings, aura, and signature skill — and clear three escalating waves of aerial combat over a vibrant fantasy realm.
+A browser-based dragon-flight duel set in the fallen kingdom of Hauthwen. You ride Eira of Aelric on her Morren dragon — three waves of aerial combat against the surviving dragon lines of three rival houses.
+
+**Status:** v0.3 — Hauthwen canon, GLTF-ready, post-FX cinematic grade
 
 **🐉 Play it live: [casterlygit.github.io/realm](https://casterlygit.github.io/realm/)**
 
-## The dragons
+## The four dragon lines
 
-Four archetypes, each genuinely different in silhouette, wings, and ability:
+The Drake-Oath broke forty winters ago. Nine houses, nine dragon lines, one crown — most of them gone. These four still fly:
 
-| Dragon | Style | Signature Skill (R) | Cooldown |
+| Dragon | House | Eye | Breath |
 |---|---|---|---|
-| **Pyrothar** — The Crimson King | Stocky bat-winged fire drake | **INFERNO** — 80m radial fire blast | 12s |
-| **Ryujin** — The Sky River | Long Eastern serpent, no bat wings, white mane, gold antlers | **TEMPEST** — forking lightning cone + 2s stun | 10s |
-| **Verdantis** — The Jade Serpent | Rainbow-feathered wings, jade body, gold accents | **BLOOM** — heal 40% over 3s + cherry-blossom damage aura | 15s |
-| **Cryos** — The Frostbloom | Crystal-facet wings, angular ice-blue body | **FROST NOVA** — 120m ice burst, freezes nearest enemy 3s | 12s |
+| **Morren** | Aelric (yours) | Ember-orange `#FF9A3C` | Tight cone of orange-white fire |
+| **Iskari** | The fallen house Iskar | Lightning-yellow `#F0E68C` | Forking pale lightning |
+| **Vethrim** | Brennoc | Fog-gold `#C9A47A` | Oily black smoke shot with cinders |
+| **Skarn** | Calden | Pale ice `#6FB3C9` | White-blue plasma that melts stone |
+
+The full canon — lore, palette, lighting rules, character bible — lives in [DESIGN.md](DESIGN.md).
 
 ## How to play
 
@@ -29,59 +33,67 @@ Four archetypes, each genuinely different in silhouette, wings, and ability:
 
 ### Game loop
 
-1. **Pick a dragon** on the title screen
-2. **Clear Wave 1** — two enemy dragons (the two archetypes you didn't pick)
-3. **Collect soul-orbs** — glowing orbs spawn between waves; fly through to heal, refund cooldown, and score
+1. **Pick a line** on the title screen
+2. **Clear Wave 1** — two enemy dragons (the houses you didn't pick)
+3. **Collect soul-orbs** between waves — heal, refund cooldown, score
 4. **Clear Wave 2** — same enemies, tougher (+20% HP, +15% fire damage)
-5. **Beat the FINAL BOSS** — one giant enemy, 2.5× HP, 1.6× size, 1.5× damage
-6. **Chase the score** — kills + orbs build a combo multiplier. Final score shown on the end card.
+5. **Beat the FINAL BOSS** — one ascendant enemy, 2.5× HP, 1.6× size, 1.5× damage
 
 ## 🖐 Hand control (MediaPipe)
 
-You can fly the dragon with your webcam — no keyboard needed. Click **🖐 ENABLE HAND CONTROL** on the dragon-select screen.
+You can fly with your webcam — no keyboard needed. Click **enable hand control** on the dragon-select screen.
 
 | Input | Action |
 |---|---|
-| Hand position (X/Y in webcam frame) | Continuous yaw + pitch (12% deadzone at center) |
+| Hand position (X/Y) | Continuous yaw + pitch (12% deadzone) |
 | **✋ Open palm** | Flap thrust |
 | **✊ Closed fist** | Fire breath |
-| **✌ Peace sign** | Trigger R-skill (debounced) |
+| **✌ Peace sign** | Trigger R-skill |
 
-The pipeline:
+The gesture vocabulary mirrors my companion project **[CasterlyGit/hand-signal](https://github.com/CasterlyGit/hand-signal)** — `realm` is the browser-side proof that the same six-gesture vocabulary can drive a real-time game, not just yes/no prompts.
+
+## GLTF model upgrade (drop-in)
+
+The four house dragons are built procedurally in [src/dragon.js](src/dragon.js), but each will auto-upgrade to a real GLB if you drop one in:
 
 ```
-webcam ──▶ MediaPipe Hands (GPU) ──▶ 21 landmarks ──▶ finger-extension classifier
-                                                                  │
-                                  ┌───────────────────────────────┤
-                                  ▼                               ▼
-                          continuous yaw/pitch              gesture booleans
-                          (hand X/Y → input axes)           (flap / fire / skill)
+public/models/morren.glb
+public/models/iskari.glb
+public/models/vethrim.glb
+public/models/skarn.glb
 ```
 
-On-screen feedback:
+The loader auto-fits each model to ~11 units, tints toward the house palette, and hot-swaps it in over the procedural body. Missing files stay procedural — no breakage.
 
-- **Webcam preview** (bottom-left) with cyan hand-skeleton overlay
-- **Scouter-style radar** showing hand position as a glowing dot inside concentric rings, with edge glows for active gestures
-- **Live event console** logging each detected gesture with a timestamp
-
-The gesture vocabulary mirrors my companion project **[CasterlyGit/hand-signal](https://github.com/CasterlyGit/hand-signal)** — a Python desktop tool that turns hand gestures into keystrokes for hands-free agent confirmations. `realm` is the browser-side proof that the same six-gesture vocabulary can drive a real-time game, not just yes/no prompts.
+CC0 sources: [Sketchfab CC0 dragons](https://sketchfab.com/search?features=downloadable&licenses=322a749bcfa841b29dff1e8a1bb74b0b&q=dragon&type=models), [Quaternius](https://quaternius.com/), [Poly Pizza](https://poly.pizza/search/dragon).
 
 ## Built with
 
-- [Three.js](https://threejs.org/) (procedural geometry, no asset downloads)
+- [Three.js](https://threejs.org/) — procedural geometry + GLTFLoader for real models
 - [Vite](https://vite.dev/) for dev + production builds
 - [@mediapipe/tasks-vision](https://developers.google.com/mediapipe/solutions/vision/hand_landmarker) — CDN-loaded, GPU-delegated hand tracking
-- Vanilla JS, no framework
-- Procedural dragons (~80 lines per archetype, flat-shaded, distinct skeletons)
-- THREE.Points + custom shader for fire breath VFX
-- Three.js built-in `Sky` shader + `FogExp2` for atmosphere
-- Three.js `InstancedMesh` for ~700 forest trees
+- Three.js built-in `Sky` shader + `FogExp2` for golden-hour atmosphere
+- `InstancedMesh` for ~700 forest trees
 - `UnrealBloomPass` for skill / fire / eye glow
-- Per-archetype animation: bat-wing flap for winged dragons, serpentine body undulation for Ryujin
+- Custom color-grade `ShaderPass`: filmic S-curve, warm/cool split-tone, vignette, animated film grain
+- Screen-shake on hit, scaled by damage severity
 
-## Design bible
+## Roadmap
 
-The full world / lore / palette / character design reference lives in [DESIGN.md](DESIGN.md) — five dragon lines (only four implemented for v1), three houses (Aelric, Calden, Brennoc), the kingdom of Hauthwen and the duel between Eira and Sten that frames the world.
+Shipped:
+
+- [x] v0.1 — playable dragon-flight combat, four archetypes, three waves
+- [x] v0.2 — MediaPipe hand control with scouter radar + gesture log
+- [x] v0.3 — Hauthwen canon repaint: four house dragons (Morren / Iskari / Vethrim / Skarn), DESIGN.md palette throughout, opening title beat, cinematic color grade, screen-shake on hit, GLTF auto-upgrade
+
+Next:
+
+- [ ] Drop four CC0 GLB dragons in `public/models/` for the visual jump
+- [ ] Audio pass — wind bed, breath-attack whoosh, hit impact, death-blow musical sting (bible §9: silence default, music only at death-blow + end card)
+- [ ] HUD reduction — bible §9 spec is a single thin warm line for vigor, no numbers. Currently still showing wave/score/skill bars
+- [ ] Ground-denizen reactivity — Carrn-folk scatter when a dragon flies low, ravens disperse from corpse circles
+- [ ] Boss arena — final wave should swap to the Carrick-na-Dun broken-tower silhouette, not the open moor
+- [ ] Replace the four procedural dragon silhouettes on the select-cards with bible-accurate side-views
 
 ## Run it locally
 
@@ -92,18 +104,21 @@ npm install
 npm run dev
 ```
 
-Open [localhost:5173](http://localhost:5173).
+Open [localhost:5173/realm/](http://localhost:5173/realm/).
 
 ## Project layout
 
 ```
 src/
-  main.js       # game loop, input, combat, waves, score, camera
-  dragon.js     # 4 archetype builders + shared animation
-  world.js      # sky, terrain, clouds, landmarks
+  main.js       # game loop, input, combat, waves, score, camera, post-FX
+  dragon.js     # 4 house builders + GLTF auto-upgrade + shared animation
+  world.js      # sky, terrain, clouds, landmarks (Hauthwen palette)
   populate.js   # forests, bridge, bonefold, NPCs, ravens
-  fx.js         # fire breath, speed streaks
-  style.css     # HUD + selection screen
+  fx.js         # fire breath particles, speed streaks
+  hand.js       # MediaPipe hand-tracking → game input
+  style.css     # HUD + selection screen + opening beat
+public/
+  models/       # drop morren.glb / iskari.glb / vethrim.glb / skarn.glb here
 DESIGN.md       # canonical lore / palette / character bible
 ```
 

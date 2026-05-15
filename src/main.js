@@ -3,6 +3,7 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { buildWorld, updateWorld } from './world.js';
 import {
   makeDragon,
@@ -44,7 +45,7 @@ const world = buildWorld(scene, renderer);
 const population = populateWorld(scene, world);
 
 const player = {
-  mesh: makeDragon('pyrothar'),
+  mesh: makeDragon('morren'),
   pos: new THREE.Vector3(-200, 560, 700),
   vel: new THREE.Vector3(),
   quat: new THREE.Quaternion(),
@@ -92,7 +93,7 @@ function spawnEnemiesFor(playerArchetype) {
     makeEnemy(others[1], new THREE.Vector3(-400, 680, -800), 7.0),
   ];
 }
-spawnEnemiesFor('pyrothar');
+spawnEnemiesFor('morren');
 
 const TOTAL_WAVES = 3;
 let wave = 0;
@@ -200,12 +201,12 @@ function showWaveBanner(n) {
 }
 
 const SKILLS = {
-  pyrothar:  { name: 'INFERNO',    cooldown: 12, color: 0xff5500 },
-  ryujin:    { name: 'TEMPEST',    cooldown: 10, color: 0x00ffff },
-  verdantis: { name: 'BLOOM',      cooldown: 15, color: 0xff66cc },
-  cryos:     { name: 'FROST NOVA', cooldown: 12, color: 0x88ddff },
+  morren:  { name: 'EMBER MAW',   cooldown: 12, color: 0xFFB347 },
+  iskari:  { name: 'STORMFORK',   cooldown: 10, color: 0xE8F0FF },
+  vethrim: { name: 'SMOKE PYRE',  cooldown: 15, color: 0x1E1A18 },
+  skarn:   { name: 'WHITE BREATH',cooldown: 12, color: 0xB8D8E8 },
 };
-player.archetype = 'pyrothar';
+player.archetype = 'morren';
 player.skillCD = 0;
 player.healingT = 0;
 
@@ -216,7 +217,7 @@ function activateSkill() {
   const head = dragonHeadWorld(player.mesh, new THREE.Vector3());
   const fwd  = dragonForward(player.mesh, new THREE.Vector3());
 
-  if (arche === 'pyrothar') {
+  if (arche === 'morren') {
     for (let i = 0; i < 320; i++) {
       const d = new THREE.Vector3(
         Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5
@@ -230,7 +231,7 @@ function activateSkill() {
         if (e.hp <= 0) killEnemy(e);
       }
     }
-  } else if (arche === 'ryujin') {
+  } else if (arche === 'iskari') {
     for (let i = 0; i < 180; i++) {
       const jitter = new THREE.Vector3(
         (Math.random() - 0.5) * 0.4,
@@ -251,7 +252,7 @@ function activateSkill() {
         if (e.hp <= 0) killEnemy(e);
       }
     }
-  } else if (arche === 'verdantis') {
+  } else if (arche === 'vethrim') {
     player.healingT = 3.0;
     for (let i = 0; i < 240; i++) {
       const ang = Math.random() * Math.PI * 2;
@@ -266,7 +267,7 @@ function activateSkill() {
         if (e.hp <= 0) killEnemy(e);
       }
     }
-  } else if (arche === 'cryos') {
+  } else if (arche === 'skarn') {
     for (let i = 0; i < 320; i++) {
       const d = new THREE.Vector3(
         Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5
@@ -297,12 +298,57 @@ const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
 const bloom = new UnrealBloomPass(
   new THREE.Vector2(window.innerWidth, window.innerHeight),
-  0.42,
-  0.55,
-  0.92
+  0.85,   // strength
+  0.4,    // radius
+  0.55,   // threshold — let eyes/fire/embers bloom hard
 );
-renderer.toneMappingExposure = 0.78;
+renderer.toneMappingExposure = 0.82;
 composer.addPass(bloom);
+
+// Color grading: warm tint (golden-hour), gentle S-curve contrast, soft vignette
+const gradePass = new ShaderPass({
+  uniforms: {
+    tDiffuse: { value: null },
+    uTime:    { value: 0 },
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+  `,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform float uTime;
+    varying vec2 vUv;
+    vec3 sCurve(vec3 c) {
+      // gentle filmic contrast around mid-gray
+      return c * c * (3.0 - 2.0 * c);
+    }
+    void main() {
+      vec4 src = texture2D(tDiffuse, vUv);
+      vec3 col = src.rgb;
+      // S-curve contrast
+      col = mix(col, sCurve(col), 0.35);
+      // Warm tint — push shadows cool, highlights warm
+      float lum = dot(col, vec3(0.299, 0.587, 0.114));
+      vec3 warm = vec3(1.06, 0.96, 0.78);
+      vec3 cool = vec3(0.86, 0.92, 1.02);
+      col *= mix(cool, warm, smoothstep(0.15, 0.85, lum));
+      // Slight desaturation (bible: low sat across the board)
+      vec3 gray = vec3(lum);
+      col = mix(gray, col, 0.86);
+      // Vignette
+      vec2 d = vUv - 0.5;
+      float vig = smoothstep(0.85, 0.35, length(d) * 1.15);
+      col *= mix(0.65, 1.0, vig);
+      // Subtle film grain
+      float n = fract(sin(dot(vUv * 1000.0 + uTime, vec2(12.9898, 78.233))) * 43758.5453);
+      col += (n - 0.5) * 0.012;
+      gl_FragColor = vec4(col, src.a);
+    }
+  `,
+});
+composer.addPass(gradePass);
+
 composer.addPass(new OutputPass());
 
 const input = {
@@ -334,10 +380,10 @@ let selected = false;
 const selectScreen = document.getElementById('select-screen');
 const cardsEl = document.getElementById('select-cards');
 const SILHOUETTES = {
-  pyrothar: `<svg viewBox="0 0 100 60"><path fill="currentColor" d="M10 40 Q15 25 30 28 L45 22 Q55 18 65 24 L80 22 Q92 25 90 38 L72 42 Q60 48 50 44 L38 48 Q20 52 10 40 Z"/></svg>`,
-  ryujin:   `<svg viewBox="0 0 100 60"><path fill="currentColor" d="M5 35 Q15 20 30 28 Q45 36 55 22 Q65 12 80 22 Q92 32 95 25 L92 30 Q85 40 70 32 Q55 24 45 36 Q30 48 15 42 Q8 40 5 35 Z"/></svg>`,
-  verdantis:`<svg viewBox="0 0 100 60"><path fill="currentColor" d="M12 38 Q18 22 35 26 L48 18 L55 24 L62 16 L68 25 L78 18 Q92 22 88 38 L72 42 Q60 48 50 44 L38 48 Q22 52 12 38 Z"/></svg>`,
-  cryos:    `<svg viewBox="0 0 100 60"><path fill="currentColor" d="M10 40 L20 22 L32 32 L42 18 L50 28 L60 16 L68 28 L80 22 L92 38 L72 42 Q60 48 50 44 L38 48 Q20 52 10 40 Z"/></svg>`,
+  morren:  `<svg viewBox="0 0 100 60"><path fill="currentColor" d="M10 40 Q15 25 30 28 L45 22 Q55 18 65 24 L80 22 Q92 25 90 38 L72 42 Q60 48 50 44 L38 48 Q20 52 10 40 Z"/></svg>`,
+  iskari:  `<svg viewBox="0 0 100 60"><path fill="currentColor" d="M5 35 Q15 20 30 28 Q45 36 55 22 Q65 12 80 22 Q92 32 95 25 L92 30 Q85 40 70 32 Q55 24 45 36 Q30 48 15 42 Q8 40 5 35 Z"/></svg>`,
+  vethrim: `<svg viewBox="0 0 100 60"><path fill="currentColor" d="M12 38 Q18 22 35 26 L48 18 L55 24 L62 16 L68 25 L78 18 Q92 22 88 38 L72 42 Q60 48 50 44 L38 48 Q22 52 12 38 Z"/></svg>`,
+  skarn:   `<svg viewBox="0 0 100 60"><path fill="currentColor" d="M10 40 L20 22 L32 32 L42 18 L50 28 L60 16 L68 28 L80 22 L92 38 L72 42 Q60 48 50 44 L38 48 Q20 52 10 40 Z"/></svg>`,
 };
 function renderCards() {
   cardsEl.innerHTML = '';
@@ -379,6 +425,14 @@ function pickDragon(key) {
   skillIndicator.style.setProperty('--skill-color', '#' + SKILLS[key].color.toString(16).padStart(6, '0'));
 }
 renderCards();
+
+const openingEl = document.getElementById('opening');
+// Bible §10: black for ~1s, title fades in, holds ~3s, fades.
+setTimeout(() => {
+  openingEl.classList.add('fading');
+  selectScreen.classList.add('revealed');
+}, 5200);
+setTimeout(() => openingEl.classList.add('gone'), 7400);
 
 const handToggleBtn = document.getElementById('hand-toggle');
 handToggleBtn.addEventListener('click', () => {
@@ -697,10 +751,15 @@ function updateEnemy(enemy, dt, t) {
 }
 
 let damageFlashT = 0;
+let shakeT = 0;
+let shakeAmp = 0;
 function damagePlayer(amount) {
   if (!player.alive) return;
   player.hp = Math.max(0, player.hp - amount);
   damageFlashT = 0.4;
+  // Screen-shake scaled by hit severity
+  shakeT = Math.max(shakeT, 0.35);
+  shakeAmp = Math.max(shakeAmp, Math.min(1.6, amount * 5.0));
   if (player.hp <= 0) killPlayer();
 }
 
@@ -778,6 +837,17 @@ function updateCamera(dt) {
 
   camera.quaternion.slerp(partialRollQuat, 1 - Math.exp(-3.5 * dt));
 
+  // Screen shake — high-freq positional jitter, decays fast
+  if (shakeT > 0) {
+    shakeT -= dt;
+    const k = Math.max(0, shakeT / 0.35) * shakeAmp;
+    const jx = (Math.random() - 0.5) * k * 0.6;
+    const jy = (Math.random() - 0.5) * k * 0.6;
+    camera.position.x += jx;
+    camera.position.y += jy;
+    if (shakeT <= 0) { shakeT = 0; shakeAmp = 0; }
+  }
+
   const targetFov = 75 + 22 * speedNorm + (input.sprint ? 4 : 0);
   camera.fov += (targetFov - camera.fov) * (1 - Math.exp(-4 * dt));
   camera.updateProjectionMatrix();
@@ -804,8 +874,9 @@ function updateHUD() {
     if (player.hp < 1 || nearest.hp < 1 || dist(player.pos, nearest.pos) < 500) {
       enemyHpWrap.classList.add('show');
       enemyHpFill.style.width = (nearest.hp * 100) + '%';
+      const def = DRAGON_CATALOG[nearest.archetype];
       enemyHpWrap.querySelector('.bar-label').textContent =
-        nearest.name.toUpperCase() + (nearest.name === 'Veil' ? ' · SKARN OF CALDEN' : ' · VETHRIM OF BRENNOC');
+        nearest.name.toUpperCase() + ' · OF HOUSE ' + (def?.house || '').toUpperCase();
     }
   }
   if (damageFlashT > 0) {
@@ -861,6 +932,7 @@ function loop() {
   fire.update(dt);
   updateWorld(world, dt, elapsed, camera);
   updatePopulation(population, dt, elapsed);
+  gradePass.uniforms.uTime.value = elapsed;
 
   const speedNorm = updateCamera(dt);
   streaks.update(camera, dt, speedNorm);

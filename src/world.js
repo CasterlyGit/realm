@@ -2,13 +2,13 @@ import * as THREE from 'three';
 import { Sky } from 'three/examples/jsm/objects/Sky.js';
 
 const PALETTE = {
-  fog: 0xf0c8e6,
-  valley: new THREE.Color(0x3aaa48),
-  moss:   new THREE.Color(0x6ed258),
-  stone:  new THREE.Color(0xa085c4),
-  snow:   new THREE.Color(0xffffff),
-  castle: 0x4a2a6b,
-  fire:   0xff5722,
+  fog:    0xc9a47a,
+  valley: new THREE.Color(0x6b5a3e),
+  moss:   new THREE.Color(0x5a5238),
+  stone:  new THREE.Color(0x4a4238),
+  snow:   new THREE.Color(0xa89a82),
+  castle: 0x2a2622,
+  fire:   0xffb347,
 };
 
 export function buildWorld(scene, renderer) {
@@ -17,7 +17,7 @@ export function buildWorld(scene, renderer) {
 
   const sky = makeSky(scene, renderer);
   const sun = makeSun(scene);
-  scene.add(new THREE.HemisphereLight(0xb8e0ff, 0xffb3d9, 0.95));
+  scene.add(new THREE.HemisphereLight(0xc9a47a, 0x2b2018, 0.55));
 
   const terrain = makeTerrain();
   scene.add(terrain.mesh);
@@ -37,12 +37,12 @@ function makeSky(scene, renderer) {
   scene.add(sky);
 
   const u = sky.material.uniforms;
-  u.turbidity.value = 3.0;
-  u.rayleigh.value = 3.5;
-  u.mieCoefficient.value = 0.002;
-  u.mieDirectionalG.value = 0.6;
+  u.turbidity.value = 6.0;
+  u.rayleigh.value = 1.8;
+  u.mieCoefficient.value = 0.004;
+  u.mieDirectionalG.value = 0.85;
 
-  const elevation = THREE.MathUtils.degToRad(6);
+  const elevation = THREE.MathUtils.degToRad(3);
   const azimuth = THREE.MathUtils.degToRad(72);
   const sunDir = new THREE.Vector3().setFromSphericalCoords(
     1,
@@ -55,8 +55,8 @@ function makeSky(scene, renderer) {
 }
 
 function makeSun(scene) {
-  const sun = new THREE.DirectionalLight(0xfff4d0, 2.6);
-  const elevation = THREE.MathUtils.degToRad(6);
+  const sun = new THREE.DirectionalLight(0xffd27a, 2.2);
+  const elevation = THREE.MathUtils.degToRad(3);
   const azimuth = THREE.MathUtils.degToRad(72);
   sun.position.setFromSphericalCoords(2000, Math.PI / 2 - elevation, azimuth);
   sun.castShadow = true;

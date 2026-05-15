@@ -1,43 +1,121 @@
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+
+// ──────────────────────────────────────────────────────────────────────
+// Optional GLTF model upgrade. If /models/<key>.glb exists, load it and
+// hot-swap it into the procedural skeleton (which keeps animating as a
+// hidden invisible rig so existing main.js wiring keeps working).
+// Drop a .glb in /public/models/morren.glb (etc) and refresh.
+// ──────────────────────────────────────────────────────────────────────
+const gltfLoader = new GLTFLoader();
+const modelCache = new Map();  // key -> Promise<THREE.Group>
+
+function loadHouseModel(key) {
+  if (modelCache.has(key)) return modelCache.get(key);
+  const p = new Promise((resolve) => {
+    gltfLoader.load(
+      `models/${key}.glb`,
+      (gltf) => resolve(gltf.scene),
+      undefined,
+      () => resolve(null),  // missing file -> stay procedural
+    );
+  });
+  modelCache.set(key, p);
+  return p;
+}
+
+function tintModel(scene, primaryHex, accentHex) {
+  const primary = new THREE.Color(primaryHex);
+  const accent  = new THREE.Color(accentHex);
+  scene.traverse((o) => {
+    if (!o.isMesh) return;
+    o.castShadow = true;
+    o.receiveShadow = false;
+    const m = o.material;
+    if (!m) return;
+    // Soft tint: blend material's base color toward primary (60%) and
+    // boost accent on emissive if present.
+    if (m.color) m.color.lerp(primary, 0.6);
+    if (m.emissive) m.emissive.copy(accent).multiplyScalar(0.15);
+    m.metalness = 0.15;
+    m.roughness = 0.75;
+    m.flatShading = false;
+    m.needsUpdate = true;
+  });
+}
+
+function fitModelTo(scene, targetLength = 11) {
+  const box = new THREE.Box3().setFromObject(scene);
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  const longest = Math.max(size.x, size.y, size.z) || 1;
+  const s = targetLength / longest;
+  scene.scale.setScalar(s);
+  // Re-center so origin is dragon center, then push head forward of origin
+  // (matches procedural convention where head sits at -z).
+  box.setFromObject(scene);
+  const center = new THREE.Vector3();
+  box.getCenter(center);
+  scene.position.sub(center.multiplyScalar(1));
+}
 
 export const DRAGON_CATALOG = {
-  pyrothar: {
-    name: 'Pyrothar',
-    subtitle: 'The Crimson King',
-    blurb: 'Stocky bat-winged drake. Fire breath, ember trail. Slow turn, heavy hits.',
-    palette: { primary: '#ff4d1a', secondary: '#ffd23f', accent: '#9a1010' },
-    build: buildPyrothar,
+  morren: {
+    name: 'Morren',
+    subtitle: 'of House Aelric',
+    blurb: 'The old royal hunting strain. Obsidian scale, ember-orange eye. Patient. Grudge-keeping.',
+    house: 'Aelric',
+    palette: { primary: '#141014', secondary: '#FFB347', accent: '#2A1A1A' },
+    build: buildMorren,
   },
-  ryujin: {
-    name: 'Ryujin',
-    subtitle: 'The Sky River',
-    blurb: 'Eastern serpent. No wings — undulates through air. Sharp turn, electric breath.',
-    palette: { primary: '#1a6bff', secondary: '#f5f8ff', accent: '#ffd700' },
-    build: buildRyujin,
+  iskari: {
+    name: 'Iskari',
+    subtitle: 'of the fallen house',
+    blurb: 'The largest line. Storm-blue, tattered wings, lightning breath. Aloof. Untrained for sixty years.',
+    house: 'Iskar',
+    palette: { primary: '#2E4A6B', secondary: '#F0E68C', accent: '#5A7090' },
+    build: buildIskari,
   },
-  verdantis: {
-    name: 'Verdantis',
-    subtitle: 'The Jade Serpent',
-    blurb: 'Feathered wings of rainbow plates. Cherry-blossom aura. Balanced flight.',
-    palette: { primary: '#1fcf6b', secondary: '#ffb3d9', accent: '#ffd700' },
-    build: buildVerdantis,
+  vethrim: {
+    name: 'Vethrim',
+    subtitle: 'of House Brennoc',
+    blurb: 'The smoke-breather. Bark-brown, frilled wings, ambush-minded. Long memory in matters of debt.',
+    house: 'Brennoc',
+    palette: { primary: '#4A3220', secondary: '#C9A47A', accent: '#6B4A30' },
+    build: buildVethrim,
   },
-  cryos: {
-    name: 'Cryos',
-    subtitle: 'The Frostbloom',
-    blurb: 'Crystal-faceted wings. Snowflake trail. Lean, fast, glass-cannon.',
-    palette: { primary: '#a0e6ff', secondary: '#ffffff', accent: '#1a4dff' },
-    build: buildCryos,
+  skarn: {
+    name: 'Skarn',
+    subtitle: 'of House Calden',
+    blurb: 'Bone-pale, cold-bred. White-blue plasma that melts stone. Calm. Surgical. Has not lost.',
+    house: 'Calden',
+    palette: { primary: '#D8CFC0', secondary: '#B8D8E8', accent: '#6FB3C9' },
+    build: buildSkarn,
   },
 };
 
 export function makeDragon(key, opts = {}) {
-  const def = DRAGON_CATALOG[key] || DRAGON_CATALOG.pyrothar;
+  const def = DRAGON_CATALOG[key] || DRAGON_CATALOG.morren;
   const dragon = def.build(opts);
   dragon.userData.archetype = key;
   dragon.userData.def = def;
   dragon.userData.phase = Math.random() * Math.PI * 2;
   dragon.userData.damage = 0;
+
+  // Try to upgrade to a real model if one exists at /models/<key>.glb
+  loadHouseModel(key).then((model) => {
+    if (!model) return;  // no file -> stay procedural
+    const inst = model.clone(true);
+    tintModel(inst, def.palette.primary, def.palette.secondary);
+    fitModelTo(inst, 11);
+    // Hide procedural body but keep userData rig (mouth/eyes/etc) animating
+    for (const child of dragon.children) {
+      if (child.isMesh) child.visible = false;
+    }
+    dragon.add(inst);
+    dragon.userData.glbInstance = inst;
+  });
+
   return dragon;
 }
 
@@ -78,15 +156,15 @@ function segmentedChain(count, startR, endR, length, mat, taperBack = false) {
   return g;
 }
 
-// ─── PYROTHAR ─────────────────────────────────────────────────────────────
-function buildPyrothar() {
+// ─── MORREN — House Aelric (baseline, obsidian, ember eye) ────────────────
+function buildMorren() {
   const root = new THREE.Group();
-  const body = flatMat(0xff4d1a, { roughness: 0.55, metalness: 0.25 });
-  const belly = flatMat(0xffd23f, { roughness: 0.7 });
-  const wing = flatMat(0x9a1010, { roughness: 0.85, extra: { side: THREE.DoubleSide } });
-  const horn = flatMat(0x3a0e0e, { roughness: 0.9 });
-  const eyeM = emissiveMat(0xffff00, 5);
-  const flameM = emissiveMat(0xff7a14, 6);
+  const body = flatMat(0x141014, { roughness: 0.6, metalness: 0.35 });
+  const belly = flatMat(0x1f1a1c, { roughness: 0.85 });
+  const wing = flatMat(0x2A1A1A, { roughness: 0.95, extra: { side: THREE.DoubleSide } });
+  const horn = flatMat(0x0e0a0a, { roughness: 1.0 });
+  const eyeM = emissiveMat(0xFF9A3C, 5);
+  const flameM = emissiveMat(0xFFB347, 6);
 
   const chest = new THREE.Mesh(new THREE.IcosahedronGeometry(1.8, 2), body);
   chest.scale.set(1.4, 1.15, 1.6); chest.position.set(0, 0, -1.0); chest.castShadow = true;
@@ -110,10 +188,18 @@ function buildPyrothar() {
   root.add(jaw);
 
   for (const side of [-1, 1]) {
-    const h = new THREE.Mesh(new THREE.ConeGeometry(0.22, 1.2, 6), horn);
-    h.position.set(side * 0.45, 2.0, -5.3);
+    // left horn longer + asymmetric per bible §3
+    const len = side < 0 ? 1.55 : 1.05;
+    const h = new THREE.Mesh(new THREE.ConeGeometry(0.22, len, 6), horn);
+    h.position.set(side * 0.45, 2.0 + (side < 0 ? 0.15 : 0), -5.3);
     h.rotation.set(-0.7, 0, side * 0.4);
     root.add(h);
+    if (side < 0) {
+      const notch = new THREE.Mesh(new THREE.TorusGeometry(0.18, 0.04, 4, 6), horn);
+      notch.position.set(side * 0.45, 2.6, -5.3);
+      notch.rotation.x = Math.PI / 2;
+      root.add(notch);
+    }
     const eye = new THREE.Mesh(new THREE.SphereGeometry(0.18, 8, 8), eyeM);
     eye.position.set(side * 0.38, 1.65, -6.0);
     root.add(eye);
@@ -146,19 +232,19 @@ function buildPyrothar() {
 
   root.userData = {
     chest, hips, neck, head, jaw, tail, wingL, wingR, mouth,
-    eyes: eyeM, flame: flameM, bodyMat: body, color: new THREE.Color(0xff4d1a),
-    auraColor: 0xff7a14,
+    eyes: eyeM, flame: flameM, bodyMat: body, color: new THREE.Color(0x141014),
+    auraColor: 0xFFB347,
   };
   return root;
 }
 
-// ─── RYUJIN ────────────────────────────────────────────────────────────────
-function buildRyujin() {
+// ─── ISKARI — fallen house Iskar (storm-blue serpent, lightning eye) ──────
+function buildIskari() {
   const root = new THREE.Group();
-  const body = flatMat(0x1a6bff, { roughness: 0.4, metalness: 0.4 });
-  const mane = flatMat(0xf5f8ff, { roughness: 0.95 });
-  const gold = flatMat(0xffd700, { roughness: 0.35, metalness: 0.7 });
-  const eyeM = emissiveMat(0x00ffff, 5);
+  const body = flatMat(0x2E4A6B, { roughness: 0.55, metalness: 0.45 });
+  const mane = flatMat(0x5A7090, { roughness: 0.95 });
+  const gold = flatMat(0x8a7a5c, { roughness: 0.6, metalness: 0.55 });
+  const eyeM = emissiveMat(0xF0E68C, 5);
 
   const SEGS = 26;
   const segments = [];
@@ -215,7 +301,7 @@ function buildRyujin() {
   }
 
   // small vestigial fins instead of wings (for visual punch)
-  const finMat = flatMat(0x1a6bff, { extra: { side: THREE.DoubleSide } });
+  const finMat = flatMat(0x2E4A6B, { extra: { side: THREE.DoubleSide } });
   for (const side of [-1, 1]) {
     const shape = new THREE.Shape();
     shape.moveTo(0, 0);
@@ -247,20 +333,20 @@ function buildRyujin() {
   root.userData = {
     segments, head, mouth,
     eyes: eyeM, bodyMat: body,
-    color: new THREE.Color(0x1a6bff),
-    auraColor: 0x00ffff,
+    color: new THREE.Color(0x2E4A6B),
+    auraColor: 0xE8F0FF,
     serpentine: true,
   };
   return root;
 }
 
-// ─── VERDANTIS ─────────────────────────────────────────────────────────────
-function buildVerdantis() {
+// ─── VETHRIM — House Brennoc (bark-brown, smoke-breather) ─────────────────
+function buildVethrim() {
   const root = new THREE.Group();
-  const body = flatMat(0x1fcf6b, { roughness: 0.5, metalness: 0.25 });
-  const belly = flatMat(0xfff0a8, { roughness: 0.8 });
-  const gold = flatMat(0xffd700, { roughness: 0.3, metalness: 0.8 });
-  const eyeM = emissiveMat(0xff66cc, 5);
+  const body = flatMat(0x4A3220, { roughness: 0.75, metalness: 0.1 });
+  const belly = flatMat(0x6B4A30, { roughness: 0.85 });
+  const gold = flatMat(0x3a2818, { roughness: 0.9 });
+  const eyeM = emissiveMat(0xC9A47A, 4);
 
   const chest = new THREE.Mesh(new THREE.IcosahedronGeometry(1.4, 2), body);
   chest.scale.set(1.1, 1.0, 1.9); chest.position.set(0, 0, -0.8); chest.castShadow = true;
@@ -290,8 +376,8 @@ function buildVerdantis() {
     root.add(eye);
   }
 
-  // Feather plates along spine and tail (rainbow)
-  const rainbow = [0xff5555, 0xff9933, 0xffd23f, 0x55ff88, 0x55cfff, 0xaa66ff];
+  // Frilled plates along spine — earth-tones, bible §3 (Vethrim membrane is frilled not torn)
+  const rainbow = [0x4A3220, 0x3a2818, 0x6B4A30, 0x2e2218, 0x5a3e26, 0x3a2a1a];
   for (let i = 0; i < 20; i++) {
     const t = i / 19;
     const z = -2.5 + t * 9.5;
@@ -321,8 +407,8 @@ function buildVerdantis() {
   root.userData = {
     chest, hips, neck, head, tail, wingL, wingR, mouth,
     eyes: eyeM, bodyMat: body,
-    color: new THREE.Color(0x1fcf6b),
-    auraColor: 0xff66cc,
+    color: new THREE.Color(0x4A3220),
+    auraColor: 0x1E1A18,
   };
   return root;
 }
@@ -357,16 +443,16 @@ function makeFeatheredWing(side, baseMat, rainbow) {
   return wing;
 }
 
-// ─── CRYOS ─────────────────────────────────────────────────────────────────
-function buildCryos() {
+// ─── SKARN — House Calden (bone-pale, surgical, undefeated) ───────────────
+function buildSkarn() {
   const root = new THREE.Group();
-  const body = flatMat(0xa0e6ff, { roughness: 0.25, metalness: 0.55 });
-  const crystal = flatMat(0xeaf6ff, {
-    roughness: 0.1, metalness: 0.05,
-    extra: { transparent: true, opacity: 0.7, side: THREE.DoubleSide },
+  const body = flatMat(0xD8CFC0, { roughness: 0.65, metalness: 0.1 });
+  const crystal = flatMat(0xE8DFCE, {
+    roughness: 0.7, metalness: 0.0,
+    extra: { side: THREE.DoubleSide },
   });
-  const dark = flatMat(0x1a4dff, { roughness: 0.3, metalness: 0.8 });
-  const eyeM = emissiveMat(0x4488ff, 6);
+  const dark = flatMat(0x8a7a68, { roughness: 0.85, metalness: 0.15 });
+  const eyeM = emissiveMat(0x6FB3C9, 4);
 
   const chest = new THREE.Mesh(new THREE.IcosahedronGeometry(1.45, 1), body);
   chest.scale.set(1.05, 0.95, 1.7); chest.position.set(0, 0, -0.9); chest.castShadow = true;
@@ -428,8 +514,8 @@ function buildCryos() {
   root.userData = {
     chest, hips, neck, head, tail, wingL, wingR, mouth,
     eyes: eyeM, bodyMat: body,
-    color: new THREE.Color(0xa0e6ff),
-    auraColor: 0x88ddff,
+    color: new THREE.Color(0xD8CFC0),
+    auraColor: 0xB8D8E8,
   };
   return root;
 }
