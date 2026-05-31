@@ -1,10 +1,51 @@
 # Realm
 
-A browser-based dragon-flight duel set in the fallen kingdom of Hauthwen. You ride Eira of Aelric on her Morren dragon — three waves of aerial combat against the surviving dragon lines of three rival houses.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Deploy to GitHub Pages](https://github.com/CasterlyGit/realm/actions/workflows/deploy.yml/badge.svg)](https://github.com/CasterlyGit/realm/actions/workflows/deploy.yml)
+[![Three.js](https://img.shields.io/badge/Three.js-r184-black?logo=threedotjs)](https://threejs.org/)
+
+**Browser dragon-flight combat: four distinct archetypes with unique breath weapons, three escalating waves, and full webcam hand-tracking — all in one Three.js + Vite build that runs at 60 fps with no server.**
 
 **Status:** v0.3 — Hauthwen canon, GLTF-ready, post-FX cinematic grade
 
-**🐉 Play it live: [casterlygit.github.io/realm](https://casterlygit.github.io/realm/)**
+**Play it live: [casterlygit.github.io/realm](https://casterlygit.github.io/realm/)**
+
+---
+
+## Signal above the fold
+
+| What | Number |
+|---|---|
+| Dragon archetypes | 4 (Morren, Iskari, Vethrim, Skarn) |
+| Combat waves | 3 (Wave 2: +20% HP / +15% dmg; Boss: 2.5× HP, 1.6× size) |
+| Forest trees (InstancedMesh) | 700 |
+| Flight speed range | cruise 40 → sprint 90 units/s |
+| Post-FX passes | UnrealBloom + custom filmic ShaderPass (S-curve, split-tone, vignette, film grain) |
+| Hand gestures | 6 (position yaw/pitch, open-palm flap, fist fire, peace-sign R-skill) |
+| Pixel ratio cap | 2× (GPU guard) |
+| Build target | GitHub Pages via Vite — zero backend |
+
+---
+
+## Architecture
+
+```mermaid
+graph TD
+    A[index.html] --> B[src/main.js<br/>game loop · input · combat · camera · post-FX]
+    B --> C[src/dragon.js<br/>4 house builders · GLTF auto-upgrade · animation]
+    B --> D[src/world.js<br/>sky · terrain · clouds · landmarks]
+    B --> E[src/populate.js<br/>700 trees InstancedMesh · bridge · NPCs · ravens]
+    B --> F[src/fx.js<br/>fire-breath particles · speed streaks]
+    B --> G[src/hand.js<br/>MediaPipe hand-tracking → game input]
+    C -->|auto-upgrade| H[public/models/*.glb<br/>drop CC0 GLBs here]
+    G -->|CDN| I[@mediapipe/tasks-vision<br/>GPU-delegated WASM]
+```
+
+---
+
+## The world
+
+A browser-based dragon-flight duel set in the fallen kingdom of Hauthwen. You ride Eira of Aelric on her Morren dragon — three waves of aerial combat against the surviving dragon lines of three rival houses.
 
 ## The four dragon lines
 
@@ -18,6 +59,8 @@ The Drake-Oath broke forty winters ago. Nine houses, nine dragon lines, one crow
 | **Skarn** | Calden | Pale ice `#6FB3C9` | White-blue plasma that melts stone |
 
 The full canon — lore, palette, lighting rules, character bible — lives in [DESIGN.md](DESIGN.md).
+
+---
 
 ## How to play
 
@@ -39,18 +82,22 @@ The full canon — lore, palette, lighting rules, character bible — lives in [
 4. **Clear Wave 2** — same enemies, tougher (+20% HP, +15% fire damage)
 5. **Beat the FINAL BOSS** — one ascendant enemy, 2.5× HP, 1.6× size, 1.5× damage
 
-## 🖐 Hand control (MediaPipe)
+---
+
+## Hand control (MediaPipe)
 
 You can fly with your webcam — no keyboard needed. Click **enable hand control** on the dragon-select screen.
 
 | Input | Action |
 |---|---|
 | Hand position (X/Y) | Continuous yaw + pitch (12% deadzone) |
-| **✋ Open palm** | Flap thrust |
-| **✊ Closed fist** | Fire breath |
-| **✌ Peace sign** | Trigger R-skill |
+| **Open palm** | Flap thrust |
+| **Closed fist** | Fire breath |
+| **Peace sign** | Trigger R-skill |
 
-The gesture vocabulary mirrors my companion project **[CasterlyGit/hand-signal](https://github.com/CasterlyGit/hand-signal)** — `realm` is the browser-side proof that the same six-gesture vocabulary can drive a real-time game, not just yes/no prompts.
+The gesture vocabulary mirrors the companion project **[CasterlyGit/hand-signal](https://github.com/CasterlyGit/hand-signal)** — `realm` is the browser-side proof that the same six-gesture vocabulary can drive a real-time game, not just yes/no prompts.
+
+---
 
 ## GLTF model upgrade (drop-in)
 
@@ -67,16 +114,33 @@ The loader auto-fits each model to ~11 units, tints toward the house palette, an
 
 CC0 sources: [Sketchfab CC0 dragons](https://sketchfab.com/search?features=downloadable&licenses=322a749bcfa841b29dff1e8a1bb74b0b&q=dragon&type=models), [Quaternius](https://quaternius.com/), [Poly Pizza](https://poly.pizza/search/dragon).
 
+---
+
+## Setup
+
+```bash
+git clone https://github.com/CasterlyGit/realm
+cd realm
+npm install
+npm run dev
+```
+
+Open [localhost:5173/realm/](http://localhost:5173/realm/).
+
+---
+
 ## Built with
 
-- [Three.js](https://threejs.org/) — procedural geometry + GLTFLoader for real models
-- [Vite](https://vite.dev/) for dev + production builds
+- [Three.js](https://threejs.org/) r184 — procedural geometry + GLTFLoader for real models
+- [Vite](https://vite.dev/) 8.x for dev + production builds
 - [@mediapipe/tasks-vision](https://developers.google.com/mediapipe/solutions/vision/hand_landmarker) — CDN-loaded, GPU-delegated hand tracking
 - Three.js built-in `Sky` shader + `FogExp2` for golden-hour atmosphere
-- `InstancedMesh` for ~700 forest trees
+- `InstancedMesh` for 700 forest trees
 - `UnrealBloomPass` for skill / fire / eye glow
 - Custom color-grade `ShaderPass`: filmic S-curve, warm/cool split-tone, vignette, animated film grain
 - Screen-shake on hit, scaled by damage severity
+
+---
 
 ## Roadmap
 
@@ -90,37 +154,19 @@ Next:
 
 - [ ] Drop four CC0 GLB dragons in `public/models/` for the visual jump
 - [ ] Audio pass — wind bed, breath-attack whoosh, hit impact, death-blow musical sting (bible §9: silence default, music only at death-blow + end card)
-- [ ] HUD reduction — bible §9 spec is a single thin warm line for vigor, no numbers. Currently still showing wave/score/skill bars
+- [ ] HUD reduction — bible §9 spec is a single thin warm line for vigor, no numbers
 - [ ] Ground-denizen reactivity — Carrn-folk scatter when a dragon flies low, ravens disperse from corpse circles
-- [ ] Boss arena — final wave should swap to the Carrick-na-Dun broken-tower silhouette, not the open moor
+- [ ] Boss arena — final wave should swap to the Carrick-na-Dun broken-tower silhouette
 - [ ] Replace the four procedural dragon silhouettes on the select-cards with bible-accurate side-views
 
-## Run it locally
+---
 
-```bash
-git clone https://github.com/CasterlyGit/realm
-cd realm
-npm install
-npm run dev
-```
+## Companion projects
 
-Open [localhost:5173/realm/](http://localhost:5173/realm/).
+- [CasterlyGit/hand-signal](https://github.com/CasterlyGit/hand-signal) — the six-gesture vocabulary that realm's hand-control mode implements
+- [CasterlyGit/curby-jarvis](https://github.com/CasterlyGit/curby-jarvis) — voice + gesture macOS controller; shares the MediaPipe gesture layer
 
-## Project layout
-
-```
-src/
-  main.js       # game loop, input, combat, waves, score, camera, post-FX
-  dragon.js     # 4 house builders + GLTF auto-upgrade + shared animation
-  world.js      # sky, terrain, clouds, landmarks (Hauthwen palette)
-  populate.js   # forests, bridge, bonefold, NPCs, ravens
-  fx.js         # fire breath particles, speed streaks
-  hand.js       # MediaPipe hand-tracking → game input
-  style.css     # HUD + selection screen + opening beat
-public/
-  models/       # drop morren.glb / iskari.glb / vethrim.glb / skarn.glb here
-DESIGN.md       # canonical lore / palette / character bible
-```
+---
 
 ## License
 
