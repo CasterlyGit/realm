@@ -1,679 +1,664 @@
+// ════════════════════════════════════════════════════════════════════════
+//  REALM — src/dragon.js
+//  Factory: makeDragon() → { group, update(dt,ctx), headWorld(outV3),
+//                            setFiring(bool), setBoost(bool), dispose() }
+//
+//  Hero serpentine dragon. Faces local -Z (forward). All geometry is
+//  procedural. Hard rules obeyed: Lambert/Basic only, no shadows, no
+//  per-frame allocations, frame-rate-independent via dt + damp().
+// ════════════════════════════════════════════════════════════════════════
+
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { ZONES, RENDER, FLIGHT, damp, clamp } from './constants.js';
 
-// ──────────────────────────────────────────────────────────────────────
-// Optional GLTF model upgrade. If /models/<key>.glb exists, load it and
-// hot-swap it into the procedural skeleton (which keeps animating as a
-// hidden invisible rig so existing main.js wiring keeps working).
-// Drop a .glb in /public/models/morren.glb (etc) and refresh.
-// ──────────────────────────────────────────────────────────────────────
-const gltfLoader = new GLTFLoader();
-const modelCache = new Map();  // key -> Promise<THREE.Group>
+// ── module-scope reusable temps (NO per-frame allocation) ──────────────
+const _v3a = new THREE.Vector3();
+const _v3b = new THREE.Vector3();
+const _col = new THREE.Color();
+const _colA = new THREE.Color();
+const _colB = new THREE.Color();
+const _mat4 = new THREE.Matrix4();
 
-function loadHouseModel(key) {
-  if (modelCache.has(key)) return modelCache.get(key);
-  const p = new Promise((resolve) => {
-    gltfLoader.load(
-      `models/${key}.glb`,
-      (gltf) => resolve(gltf.scene),
-      undefined,
-      () => resolve(null),  // missing file -> stay procedural
-    );
-  });
-  modelCache.set(key, p);
-  return p;
-}
+// ── legacy shim: maps group → api for old main.js compatibility ────────
+const _legacyInstances = new WeakMap();
 
-function tintModel(scene, primaryHex, accentHex) {
-  const primary = new THREE.Color(primaryHex);
-  const accent  = new THREE.Color(accentHex);
-  scene.traverse((o) => {
-    if (!o.isMesh) return;
-    o.castShadow = true;
-    o.receiveShadow = false;
-    const m = o.material;
-    if (!m) return;
-    // Soft tint: blend material's base color toward primary (60%) and
-    // boost accent on emissive if present.
-    if (m.color) m.color.lerp(primary, 0.6);
-    if (m.emissive) m.emissive.copy(accent).multiplyScalar(0.15);
-    m.metalness = 0.15;
-    m.roughness = 0.75;
-    m.flatShading = false;
-    m.needsUpdate = true;
+// ── constants ──────────────────────────────────────────────────────────
+const TRAIL_LEN   = 44;   // position ring-buffer length
+const TRAIL_WIDTH = 0.55; // base half-width at head end
+const NECK_SEGS   = 7;
+const TAIL_SEGS   = 10;
+
+// ── helpers ────────────────────────────────────────────────────────────
+function lambertMat(color, opts = {}) {
+  return new THREE.MeshLambertMaterial({
+    color,
+    flatShading: true,
+    ...opts,
   });
 }
 
-function fitModelTo(scene, targetLength = 11) {
-  const box = new THREE.Box3().setFromObject(scene);
-  const size = new THREE.Vector3();
-  box.getSize(size);
-  const longest = Math.max(size.x, size.y, size.z) || 1;
-  const s = targetLength / longest;
-  scene.scale.setScalar(s);
-  // Re-center so origin is dragon center, then push head forward of origin
-  // (matches procedural convention where head sits at -z).
-  box.setFromObject(scene);
-  const center = new THREE.Vector3();
-  box.getCenter(center);
-  scene.position.sub(center.multiplyScalar(1));
+function basicMat(opts = {}) {
+  return new THREE.MeshBasicMaterial(opts);
 }
 
+// Additive glow sprite: a soft radial CanvasTexture
+function makeGlowTex(res = 64) {
+  const c = document.createElement('canvas');
+  c.width = c.height = res;
+  const ctx = c.getContext('2d');
+  const grad = ctx.createRadialGradient(res / 2, res / 2, 0, res / 2, res / 2, res / 2);
+  grad.addColorStop(0.0, 'rgba(255,255,255,1.0)');
+  grad.addColorStop(0.35, 'rgba(255,255,255,0.6)');
+  grad.addColorStop(1.0, 'rgba(255,255,255,0.0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, res, res);
+  const tex = new THREE.CanvasTexture(c);
+  tex.needsUpdate = true;
+  return tex;
+}
+
+const _glowTex = makeGlowTex(64); // shared across all glow sprites
+
+function makeGlowSprite(size, color) {
+  const mat = basicMat({
+    map: _glowTex,
+    color,
+    blending: THREE.AdditiveBlending,
+    transparent: true,
+    depthWrite: false,
+    opacity: 1.0,
+  });
+  const geo = new THREE.PlaneGeometry(size, size);
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.renderOrder = 1;
+  return mesh;
+}
+
+// Build a swept wing membrane (ShapeGeometry, DoubleSide, additive-transparent)
+function buildWingMesh(side, wingColor) {
+  // Wing shape — elegant long swept membrane, finger spars implied via vertices
+  const s = side; // -1 = left, +1 = right
+  const shape = new THREE.Shape();
+  // Leading edge spar root → tip → trailing scallop → body attach
+  shape.moveTo(0, 0);
+  shape.lineTo(s * 1.2,  0.6);
+  shape.lineTo(s * 4.5,  0.5);  // leading spar tip
+  shape.lineTo(s * 5.8,  0.0);  // wingtip
+  shape.lineTo(s * 4.8, -0.8);  // lower wingtip
+  shape.lineTo(s * 3.4, -0.4);  // first scallop
+  shape.lineTo(s * 2.2, -1.1);  // trailing notch
+  shape.lineTo(s * 1.2, -0.5);  // second scallop
+  shape.lineTo(s * 0.3, -1.4);  // trailing edge back
+  shape.lineTo(0,        -0.9);
+  shape.lineTo(0,         0);
+
+  const geo = new THREE.ShapeGeometry(shape, 3);
+  const mat = basicMat({
+    color: wingColor,
+    transparent: true,
+    opacity: 0.72,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    blending: THREE.NormalBlending,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  // Wings lie in XZ plane (plan view), rotate so they spread laterally
+  mesh.rotation.x = -Math.PI / 2;
+  return mesh;
+}
+
+// Build a tapered cylinder segment chain (neck or tail)
+function buildChain(count, rStart, rEnd, segLen, mat) {
+  const group = new THREE.Group();
+  const joints = [];
+  for (let i = 0; i < count; i++) {
+    const t   = i / Math.max(1, count - 1);
+    const r   = THREE.MathUtils.lerp(rStart, rEnd, t);
+    const geo = new THREE.CylinderGeometry(r * 0.9, r, segLen, 6);
+    const m   = new THREE.Mesh(geo, mat);
+    // Cylinder default is Y-axis; rotate to Z-axis (facing forward)
+    m.rotation.x = Math.PI / 2;
+    m.position.z = i * segLen;
+    group.add(m);
+    joints.push(m);
+  }
+  group.userData.joints = joints;
+  return group;
+}
+
+// ── Trail ribbon (BufferGeometry rebuilt per frame from ring-buffer) ───
+function buildTrailMesh() {
+  // (TRAIL_LEN - 1) quads × 2 triangles × 3 vertices = (TRAIL_LEN-1)*6 verts
+  const maxVerts = (TRAIL_LEN - 1) * 6;
+  const geo = new THREE.BufferGeometry();
+  const pos  = new Float32Array(maxVerts * 3);
+  const col  = new Float32Array(maxVerts * 3);
+  const posAttr = new THREE.BufferAttribute(pos,  3);
+  const colAttr = new THREE.BufferAttribute(col,  3);
+  posAttr.setUsage(THREE.DynamicDrawUsage);
+  colAttr.setUsage(THREE.DynamicDrawUsage);
+  geo.setAttribute('position', posAttr);
+  geo.setAttribute('color',    colAttr);
+  geo.setDrawRange(0, 0);
+
+  const mat = new THREE.MeshBasicMaterial({
+    vertexColors: true,
+    blending: THREE.AdditiveBlending,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = 2;
+  return mesh;
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  FACTORY
+// ══════════════════════════════════════════════════════════════════════
+// When called with a legacy key string (old main.js path), return the group
+// directly (so scene.add(makeDragon('morren')) works) and register for shims.
+// When called with no args (BUILD_SPEC game.js path), return the full interface.
+export function makeDragon(legacyKey) {
+  const group = new THREE.Group();
+
+  // ── materials (rebuilt on zone-tint update) ─────────────────────────
+  // Body/scale: dark dorsal — Lambert flatShading
+  const bodyMat   = lambertMat(0x1a1220);
+  // Belly: emissive panel — BasicMaterial, zone-tinted
+  const bellyMat  = basicMat({ color: 0xff6a18, transparent: true, opacity: 0.92 });
+  // Wing membrane: BasicMaterial, zone-tinted
+  const wingMat   = basicMat({
+    color: 0xffe29a,
+    transparent: true,
+    opacity: 0.72,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  // Mouth glow (firing)
+  const mouthMat  = basicMat({
+    color: 0xff6a18,
+    blending: THREE.AdditiveBlending,
+    transparent: true,
+    depthWrite: false,
+    opacity: 0.0,
+  });
+  // Eye dot
+  const eyeMat    = basicMat({ color: 0xffdd00 });
+
+  // ── BODY ─────────────────────────────────────────────────────────────
+  // Main torso: elongated icosahedron
+  const chestGeo  = new THREE.IcosahedronGeometry(1.6, 1);
+  const chest     = new THREE.Mesh(chestGeo, bodyMat);
+  chest.scale.set(1.1, 0.95, 1.85);
+  chest.position.set(0, 0, -0.6);
+  group.add(chest);
+
+  const hipGeo    = new THREE.IcosahedronGeometry(1.4, 1);
+  const hips      = new THREE.Mesh(hipGeo, bodyMat);
+  hips.scale.set(0.95, 0.88, 1.75);
+  hips.position.set(0, -0.05, 1.5);
+  group.add(hips);
+
+  // Belly panel (emissive) — flattened along underside
+  const bellyGeo  = new THREE.IcosahedronGeometry(1.25, 1);
+  const belly     = new THREE.Mesh(bellyGeo, bellyMat);
+  belly.scale.set(0.88, 0.38, 2.5);
+  belly.position.set(0, -0.92, 0.35);
+  group.add(belly);
+
+  // Dorsal spine frills (low-poly cones)
+  const spineCount = 14;
+  const spineMeshes = [];
+  for (let i = 0; i < spineCount; i++) {
+    const t  = i / (spineCount - 1);
+    const sz = 0.08 + 0.28 * Math.sin(t * Math.PI); // peak at mid-back
+    const sg = new THREE.ConeGeometry(sz * 0.6, sz * 1.6, 4);
+    const sm = new THREE.Mesh(sg, bodyMat);
+    const z  = -2.0 + t * 5.5;
+    sm.position.set(0, 0.85 + sz * 0.5, z);
+    sm.rotation.x = -0.12;
+    group.add(sm);
+    spineMeshes.push(sm);
+  }
+
+  // ── NECK (segmented chain, animates as sway) ──────────────────────────
+  const neckGroup = buildChain(NECK_SEGS, 0.72, 0.38, 0.52, bodyMat);
+  neckGroup.position.set(0, 0.55, -2.3);
+  neckGroup.rotation.x = -0.3;
+  group.add(neckGroup);
+
+  // ── HEAD ───────────────────────────────────────────────────────────────
+  const headGroup = new THREE.Group();
+  headGroup.position.set(0, 0.72, -6.15);
+  group.add(headGroup);
+
+  const craniumGeo = new THREE.IcosahedronGeometry(0.72, 1);
+  const cranium    = new THREE.Mesh(craniumGeo, bodyMat);
+  cranium.scale.set(1.05, 0.88, 1.45);
+  headGroup.add(cranium);
+
+  // Snout / jaw
+  const snoutGeo = new THREE.IcosahedronGeometry(0.52, 1);
+  const snout    = new THREE.Mesh(snoutGeo, bodyMat);
+  snout.scale.set(0.82, 0.48, 1.55);
+  snout.position.set(0, -0.22, -0.72);
+  headGroup.add(snout);
+
+  // Horns (swept back)
+  for (const side of [-1, 1]) {
+    const hGeo = new THREE.ConeGeometry(0.14, 1.4, 5);
+    const horn = new THREE.Mesh(hGeo, bodyMat);
+    horn.position.set(side * 0.38, 0.52, 0.18);
+    horn.rotation.set(-0.55, 0, side * 0.35);
+    headGroup.add(horn);
+
+    // Secondary smaller horn
+    const h2g = new THREE.ConeGeometry(0.08, 0.72, 4);
+    const h2  = new THREE.Mesh(h2g, bodyMat);
+    h2.position.set(side * 0.52, 0.3, 0.45);
+    h2.rotation.set(-0.75, 0, side * 0.55);
+    headGroup.add(h2);
+  }
+
+  // Eyes
+  const eyeGeos = [];
+  const eyeGlowSprites = [];
+  for (const side of [-1, 1]) {
+    const eGeo  = new THREE.SphereGeometry(0.12, 6, 6);
+    const eye   = new THREE.Mesh(eGeo, eyeMat);
+    eye.position.set(side * 0.3, 0.12, -0.6);
+    headGroup.add(eye);
+    eyeGeos.push(eye);
+
+    const glowS = makeGlowSprite(0.55, 0xffdd00);
+    glowS.position.set(side * 0.3, 0.12, -0.62);
+    headGroup.add(glowS);
+    eyeGlowSprites.push(glowS);
+  }
+
+  // Mouth glow (shown when firing)
+  const mouthGlowS = makeGlowSprite(1.4, 0xff6a18);
+  mouthGlowS.material.opacity = 0.0;
+  mouthGlowS.position.set(0, -0.22, -1.35);
+  headGroup.add(mouthGlowS);
+
+  // Mouth anchor (fire origin)
+  const mouthAnchor = new THREE.Object3D();
+  mouthAnchor.position.set(0, -0.22, -1.45);
+  headGroup.add(mouthAnchor);
+
+  // ── TAIL ───────────────────────────────────────────────────────────────
+  const tailGroup = buildChain(TAIL_SEGS, 0.62, 0.06, 0.58, bodyMat);
+  tailGroup.position.set(0, 0.08, 2.3);
+  tailGroup.rotation.x = 0.2;
+  group.add(tailGroup);
+
+  // Tail fork — two forked tips
+  const forkGroup = new THREE.Group();
+  forkGroup.position.z = TAIL_SEGS * 0.58;
+  tailGroup.add(forkGroup);
+  for (const side of [-1, 1]) {
+    const fGeo = new THREE.ConeGeometry(0.06, 0.7, 4);
+    const fork = new THREE.Mesh(fGeo, bodyMat);
+    fork.position.set(side * 0.2, 0, 0.4);
+    fork.rotation.set(Math.PI / 2, 0, side * 0.35);
+    forkGroup.add(fork);
+  }
+
+  // ── WINGS ──────────────────────────────────────────────────────────────
+  // Wing root groups for flapping pivot
+  const wingRootL = new THREE.Group();
+  const wingRootR = new THREE.Group();
+  wingRootL.position.set(-1.05, 0.85, -0.55);
+  wingRootR.position.set( 1.05, 0.85, -0.55);
+  group.add(wingRootL, wingRootR);
+
+  // Wing membrane (ShapeGeometry, per-side)
+  const wingMemL = buildWingMesh(-1, 0xffe29a);
+  const wingMemR = buildWingMesh( 1, 0xffe29a);
+  // Swap to the shared wingMat so zone tinting works from one material
+  wingMemL.material.dispose();
+  wingMemR.material.dispose();
+  wingMemL.material = wingMat;
+  wingMemR.material = wingMat;
+
+  // Wing arm spar (thin cylinder)
+  for (const [root, side] of [[wingRootL, -1], [wingRootR, 1]]) {
+    const sparGeo = new THREE.CylinderGeometry(0.12, 0.08, 5.6, 5);
+    const spar    = new THREE.Mesh(sparGeo, bodyMat);
+    spar.rotation.z = (Math.PI / 2) * -side; // horizontal
+    spar.position.x = side * 2.8;
+    root.add(spar);
+  }
+
+  wingRootL.add(wingMemL);
+  wingRootR.add(wingMemR);
+
+  // ── TRAIL RIBBON ────────────────────────────────────────────────────────
+  const trailMesh  = buildTrailMesh();
+  // Trail exists in world space — add to group but will be positioned via
+  // world positions; set renderOrder so it draws over geometry
+  group.add(trailMesh);
+
+  // Ring buffer: last TRAIL_LEN world positions
+  const trailBuf   = new Array(TRAIL_LEN).fill(null).map(() => new THREE.Vector3());
+  let   trailHead  = 0; // write pointer
+  let   trailFull  = false;
+
+  // ── STATE ──────────────────────────────────────────────────────────────
+  let isFiring  = false;
+  let isBoost   = false;
+  let flapPhase = 0.0;
+  let neckSway  = 0.0;
+  let tailSway  = 0.0;
+  let mouthGlow = 0.0; // 0..1, smoothed
+
+  // Zone color state (lerped each frame)
+  const curEmissive = new THREE.Color(ZONES[0].dragonEmissive);
+  const curEye      = new THREE.Color(ZONES[0].dragonEye);
+  const curTrail    = new THREE.Color(ZONES[0].trail);
+
+  // ── TRAIL update helper ────────────────────────────────────────────────
+  const _up = new THREE.Vector3(0, 1, 0);
+
+  function rebuildTrail(boostActive) {
+    const posAttr = trailMesh.geometry.getAttribute('position');
+    const colAttr = trailMesh.geometry.getAttribute('color');
+    const posArr  = posAttr.array;
+    const colArr  = colAttr.array;
+
+    const count   = trailFull ? TRAIL_LEN : trailHead;
+    if (count < 2) {
+      trailMesh.geometry.setDrawRange(0, 0);
+      return;
+    }
+
+    // Walk ring-buffer oldest → newest
+    let vi = 0; // vertex index (positions)
+    const maxOpacity = boostActive ? 0.85 : 0.60;
+
+    for (let i = 0; i < count - 1; i++) {
+      // i=0 → oldest end (tail of ribbon), i=count-2 → newest segment
+      const idxA = (trailHead - count + i     + TRAIL_LEN) % TRAIL_LEN;
+      const idxB = (trailHead - count + i + 1 + TRAIL_LEN) % TRAIL_LEN;
+
+      const pA = trailBuf[idxA];
+      const pB = trailBuf[idxB];
+
+      // Taper: 0=tail of ribbon (narrow), 1=head end (full width)
+      const tA  = i       / (count - 1);
+      const tB  = (i + 1) / (count - 1);
+      const wA  = tA * TRAIL_WIDTH * (boostActive ? 1.4 : 1.0);
+      const wB  = tB * TRAIL_WIDTH * (boostActive ? 1.4 : 1.0);
+      const opA = tA * maxOpacity;
+      const opB = tB * maxOpacity;
+
+      // Ribbon normal: cross segment dir with up → side vector
+      _v3a.subVectors(pB, pA).normalize();
+      _v3b.crossVectors(_v3a, _up).normalize();
+
+      // Quad: two triangles (A0, A1, B0) and (A1, B1, B0)
+      const A0x = pA.x - _v3b.x * wA;
+      const A0y = pA.y - _v3b.y * wA;
+      const A0z = pA.z - _v3b.z * wA;
+      const A1x = pA.x + _v3b.x * wA;
+      const A1y = pA.y + _v3b.y * wA;
+      const A1z = pA.z + _v3b.z * wA;
+      const B0x = pB.x - _v3b.x * wB;
+      const B0y = pB.y - _v3b.y * wB;
+      const B0z = pB.z - _v3b.z * wB;
+      const B1x = pB.x + _v3b.x * wB;
+      const B1y = pB.y + _v3b.y * wB;
+      const B1z = pB.z + _v3b.z * wB;
+
+      const r = curTrail.r;
+      const g = curTrail.g;
+      const b = curTrail.b;
+
+      // tri 1: A0, A1, B0
+      posArr[vi*3+0] = A0x; posArr[vi*3+1] = A0y; posArr[vi*3+2] = A0z;
+      colArr[vi*3+0] = r*opA; colArr[vi*3+1] = g*opA; colArr[vi*3+2] = b*opA; vi++;
+      posArr[vi*3+0] = A1x; posArr[vi*3+1] = A1y; posArr[vi*3+2] = A1z;
+      colArr[vi*3+0] = r*opA; colArr[vi*3+1] = g*opA; colArr[vi*3+2] = b*opA; vi++;
+      posArr[vi*3+0] = B0x; posArr[vi*3+1] = B0y; posArr[vi*3+2] = B0z;
+      colArr[vi*3+0] = r*opB; colArr[vi*3+1] = g*opB; colArr[vi*3+2] = b*opB; vi++;
+
+      // tri 2: A1, B1, B0
+      posArr[vi*3+0] = A1x; posArr[vi*3+1] = A1y; posArr[vi*3+2] = A1z;
+      colArr[vi*3+0] = r*opA; colArr[vi*3+1] = g*opA; colArr[vi*3+2] = b*opA; vi++;
+      posArr[vi*3+0] = B1x; posArr[vi*3+1] = B1y; posArr[vi*3+2] = B1z;
+      colArr[vi*3+0] = r*opB; colArr[vi*3+1] = g*opB; colArr[vi*3+2] = b*opB; vi++;
+      posArr[vi*3+0] = B0x; posArr[vi*3+1] = B0y; posArr[vi*3+2] = B0z;
+      colArr[vi*3+0] = r*opB; colArr[vi*3+1] = g*opB; colArr[vi*3+2] = b*opB; vi++;
+    }
+
+    posAttr.needsUpdate = true;
+    colAttr.needsUpdate = true;
+    trailMesh.geometry.setDrawRange(0, vi);
+  }
+
+  // ── PUBLIC API ──────────────────────────────────────────────────────────
+
+  function setFiring(on) { isFiring = on; }
+  function setBoost(on)  { isBoost  = on; }
+
+  // headWorld(outV3): write mouth world position into outV3
+  function headWorld(out) {
+    mouthAnchor.getWorldPosition(out);
+    return out;
+  }
+
+  // ── UPDATE ───────────────────────────────────────────────────────────────
+  function update(dt, ctx) {
+    try {
+      const { time, player, zone } = ctx;
+      const speed = player?.speed ?? FLIGHT.SPEED_CRUISE;
+      const speedN = player?.speedNorm ?? 0.5;
+
+      // ── Zone color lerp ──────────────────────────────────────────────
+      const zd = zone?.data  ?? ZONES[0];
+      const zn = zone?.next  ?? ZONES[1];
+      const zb = zone?.blend ?? 0;
+
+      _colA.setHex(zd.dragonEmissive);
+      _colB.setHex(zn.dragonEmissive);
+      curEmissive.lerpColors(_colA, _colB, zb);
+
+      _colA.setHex(zd.dragonEye);
+      _colB.setHex(zn.dragonEye);
+      curEye.lerpColors(_colA, _colB, zb);
+
+      _colA.setHex(zd.trail);
+      _colB.setHex(zn.trail);
+      curTrail.lerpColors(_colA, _colB, zb);
+
+      // Apply zone tints to materials
+      bellyMat.color.copy(curEmissive);
+      eyeMat.color.copy(curEye);
+      for (const s of eyeGlowSprites) s.material.color.copy(curEye);
+
+      // Wing membrane: zone accent tint
+      _colA.setHex(zd.accent ?? zd.trail);
+      _colB.setHex(zn.accent ?? zn.trail);
+      _col.lerpColors(_colA, _colB, zb);
+      wingMat.color.copy(_col);
+
+      // ── Wing flap ────────────────────────────────────────────────────
+      // Frequency rises slightly with speed, amplitude bigger when slow
+      const flapFreq = 2.2 + speedN * 1.4;
+      const flapAmp  = 0.55 - speedN * 0.22; // slow → bigger flap
+      flapPhase += dt * flapFreq * Math.PI * 2;
+
+      const flapAngle = Math.sin(flapPhase) * flapAmp;
+      wingRootL.rotation.z = -flapAngle;  // left wing flaps up/down
+      wingRootR.rotation.z =  flapAngle;
+
+      // Wing fold toward body slightly at high speed (sleek)
+      const foldZ = speedN * 0.25;
+      wingRootL.rotation.y =  foldZ;
+      wingRootR.rotation.y = -foldZ;
+
+      // ── Neck sway (serpentine, S-curve) ─────────────────────────────
+      const swayFreq = 0.65;
+      const swayAmp  = 0.14;
+      neckSway = Math.sin(time * swayFreq) * swayAmp;
+      const neckJoints = neckGroup.userData.joints;
+      if (neckJoints) {
+        for (let i = 0; i < neckJoints.length; i++) {
+          const t = i / Math.max(1, neckJoints.length - 1);
+          // Phase offset so sway ripples down the chain
+          const phase = time * swayFreq + t * 1.8;
+          neckJoints[i].position.x = Math.sin(phase) * swayAmp * t * 2.2;
+          neckJoints[i].position.y = Math.cos(phase * 0.5) * swayAmp * 0.4 * t;
+        }
+      }
+
+      // Head follows neck tip
+      const neckTipOffset = neckSway * 1.6;
+      headGroup.position.x = damp(headGroup.position.x, neckTipOffset, 8.0, dt);
+      headGroup.rotation.y = damp(headGroup.rotation.y, -neckTipOffset * 0.18, 5.0, dt);
+
+      // ── Tail sway ────────────────────────────────────────────────────
+      const tailJoints = tailGroup.userData.joints;
+      if (tailJoints) {
+        for (let i = 0; i < tailJoints.length; i++) {
+          const t     = i / Math.max(1, tailJoints.length - 1);
+          const phase = time * swayFreq + t * 2.2 + Math.PI; // opposite phase to neck
+          tailJoints[i].position.x = Math.sin(phase) * 0.18 * t * t;
+        }
+      }
+
+      // ── Mouth / firing glow ──────────────────────────────────────────
+      const mouthTarget = isFiring ? 1.0 : 0.0;
+      mouthGlow = damp(mouthGlow, mouthTarget, 9.0, dt);
+      mouthGlowS.material.opacity = mouthGlow * 0.85;
+      mouthGlowS.material.color.copy(curEmissive);
+
+      // Belly pulses gently when firing
+      const bellyPulse = 0.85 + Math.sin(time * 8.0) * 0.07 * mouthGlow;
+      bellyMat.opacity = 0.88 + mouthGlow * 0.08;
+      belly.scale.y = 0.38 * bellyPulse;
+
+      // Eye glow pulses at flap beat
+      const eyePulse = 0.7 + Math.abs(Math.sin(flapPhase)) * 0.3;
+      for (const s of eyeGlowSprites) s.material.opacity = eyePulse;
+
+      // ── Trail ring-buffer ────────────────────────────────────────────
+      // Write current world pos
+      const wp = trailBuf[trailHead];
+      group.getWorldPosition(wp);
+      trailHead = (trailHead + 1) % TRAIL_LEN;
+      if (trailHead === 0) trailFull = true;
+
+      // Rebuild ribbon geometry
+      rebuildTrail(isBoost);
+
+      // Trail mesh lives in world space — reset its parent transform effect
+      // by positioning it at world origin relative to the group
+      group.getWorldPosition(_v3a);
+      trailMesh.position.copy(_v3a).negate().add(_v3a); // = (0,0,0) in parent
+      // Actually: trailMesh is a child of group; positions in buffer are world.
+      // We need to express them in group-local space.
+      // Recompute: subtract group world pos from all buffer positions via matrix.
+      // Efficient path: set trailMesh.matrixAutoUpdate=false and apply inverse.
+      // Simpler: set trailMesh position so local = world (negate parent world pos)
+      group.getWorldPosition(_v3b);
+      trailMesh.position.set(-_v3b.x, -_v3b.y, -_v3b.z);
+
+    } catch (_) {
+      // Never throw in update
+    }
+  }
+
+  // ── DISPOSE ──────────────────────────────────────────────────────────────
+  function dispose() {
+    group.traverse((o) => {
+      if (o.isMesh) {
+        o.geometry?.dispose();
+        if (Array.isArray(o.material)) o.material.forEach(m => m.dispose());
+        else o.material?.dispose();
+      }
+    });
+    _glowTex.dispose?.(); // shared — only safe if nothing else uses it
+    trailMesh.geometry.dispose();
+    trailMesh.material.dispose();
+  }
+
+  const api = { group, update, headWorld, setFiring, setBoost, dispose };
+
+  if (typeof legacyKey === 'string') {
+    // Legacy path: register for shim functions, return the group itself
+    _legacyInstances.set(group, api);
+    group.userData.dragonApi = api;
+    return group;
+  }
+
+  return api;
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  LEGACY SHIMS — keep old main.js compiling while new game.js uses the
+//  factory interface above. These are no-ops / thin wrappers.
+// ══════════════════════════════════════════════════════════════════════
+
+// Old main.js called makeDragon(key) and used the returned group directly.
+// When called with a key string, makeDragon registers the api in _legacyInstances
+// (declared at module scope) and returns the group itself for scene.add() compat.
+
+// Palette catalogue stub (old main.js reads DRAGON_CATALOG[key].name)
 export const DRAGON_CATALOG = {
-  morren: {
-    name: 'Morren',
-    subtitle: 'of House Aelric',
-    blurb: 'The old royal hunting strain. Obsidian scale, ember-orange eye. Patient. Grudge-keeping.',
-    house: 'Aelric',
-    palette: { primary: '#141014', secondary: '#FFB347', accent: '#2A1A1A' },
-    build: buildMorren,
-  },
-  iskari: {
-    name: 'Iskari',
-    subtitle: 'of the fallen house',
-    blurb: 'The largest line. Storm-blue, tattered wings, lightning breath. Aloof. Untrained for sixty years.',
-    house: 'Iskar',
-    palette: { primary: '#2E4A6B', secondary: '#F0E68C', accent: '#5A7090' },
-    build: buildIskari,
-  },
-  vethrim: {
-    name: 'Vethrim',
-    subtitle: 'of House Brennoc',
-    blurb: 'The smoke-breather. Bark-brown, frilled wings, ambush-minded. Long memory in matters of debt.',
-    house: 'Brennoc',
-    palette: { primary: '#4A3220', secondary: '#C9A47A', accent: '#6B4A30' },
-    build: buildVethrim,
-  },
-  skarn: {
-    name: 'Skarn',
-    subtitle: 'of House Calden',
-    blurb: 'Bone-pale, cold-bred. White-blue plasma that melts stone. Calm. Surgical. Has not lost.',
-    house: 'Calden',
-    palette: { primary: '#D8CFC0', secondary: '#B8D8E8', accent: '#6FB3C9' },
-    build: buildSkarn,
-  },
+  morren:  { name: 'Morren',  subtitle: 'of House Aelric',   build: null },
+  iskari:  { name: 'Iskari',  subtitle: 'of the fallen house', build: null },
+  vethrim: { name: 'Vethrim', subtitle: 'of House Brennoc',  build: null },
+  skarn:   { name: 'Skarn',   subtitle: 'of House Calden',   build: null },
 };
 
-export function makeDragon(key, opts = {}) {
-  const def = DRAGON_CATALOG[key] || DRAGON_CATALOG.morren;
-  const dragon = def.build(opts);
-  dragon.userData.archetype = key;
-  dragon.userData.def = def;
-  dragon.userData.phase = Math.random() * Math.PI * 2;
-  dragon.userData.damage = 0;
+// animateDragon(mesh, time, dt, flapBoost) — old per-frame call
+export function animateDragon(group, time, dt, flapBoost = 0) {
+  if (!group) return;
+  const inst = _legacyInstances.get(group);
+  if (!inst) return;
+  // Build a minimal ctx so our real update() runs
+  const fakeCtx = {
+    time,
+    player: {
+      speed: FLIGHT.SPEED_CRUISE + flapBoost * 20,
+      speedNorm: 0.5 + flapBoost * 0.3,
+      pos: group.position,
+      glideFall: false,
+    },
+    zone: { data: ZONES[0], next: ZONES[1], blend: 0, index: 0 },
+    camera: null,
+  };
+  inst.update(dt, fakeCtx);
+}
 
-  // Try to upgrade to a real model if one exists at /models/<key>.glb
-  loadHouseModel(key).then((model) => {
-    if (!model) return;  // no file -> stay procedural
-    const inst = model.clone(true);
-    tintModel(inst, def.palette.primary, def.palette.secondary);
-    fitModelTo(inst, 11);
-    // Hide procedural body but keep userData rig (mouth/eyes/etc) animating
-    for (const child of dragon.children) {
-      if (child.isMesh) child.visible = false;
+// setDragonDamage(mesh, frac) — old damage tint call
+export function setDragonDamage(group, frac) {
+  if (!group) return;
+  // Visual-only: darken the body a little — no-op is safe
+  group.traverse((o) => {
+    if (o.isMesh && o.material?.color) {
+      o.material.color.setScalar(1.0 - frac * 0.4);
     }
-    dragon.add(inst);
-    dragon.userData.glbInstance = inst;
-  });
-
-  return dragon;
-}
-
-function flatMat(color, opts = {}) {
-  return new THREE.MeshStandardMaterial({
-    color,
-    roughness: opts.roughness ?? 0.7,
-    metalness: opts.metalness ?? 0.15,
-    flatShading: true,
-    ...opts.extra,
-  });
-}
-function emissiveMat(color, intensity = 4) {
-  return new THREE.MeshStandardMaterial({
-    color, emissive: color, emissiveIntensity: intensity,
   });
 }
 
-function segmentedChain(count, startR, endR, length, mat, taperBack = false) {
-  const g = new THREE.Group();
-  const segs = [];
-  for (let i = 0; i < count; i++) {
-    const t = i / Math.max(1, count - 1);
-    const r = THREE.MathUtils.lerp(startR, endR, t);
-    const segLen = length / count;
-    const seg = new THREE.Mesh(
-      new THREE.CylinderGeometry(r, r * 0.9, segLen * 1.06, 8),
-      mat
-    );
-    seg.position.z = (taperBack ? -1 : 1) * i * segLen;
-    seg.rotation.x = Math.PI / 2;
-    seg.castShadow = true;
-    g.add(seg);
-    segs.push(seg);
-  }
-  g.userData.segments = segs;
-  g.userData.segLen = length / count;
-  return g;
+// dragonHeadWorld(mesh, outV3) → outV3
+export function dragonHeadWorld(group, out) {
+  if (!group || !out) return out ?? new THREE.Vector3();
+  const inst = _legacyInstances.get(group);
+  if (inst) return inst.headWorld(out);
+  // Fallback: approximate head as -Z offset from group
+  out.set(0, 0, -7).applyQuaternion(group.quaternion).add(group.position);
+  return out;
 }
 
-// ─── MORREN — House Aelric (baseline, obsidian, ember eye) ────────────────
-function buildMorren() {
-  const root = new THREE.Group();
-  const body = flatMat(0x141014, { roughness: 0.6, metalness: 0.35 });
-  const belly = flatMat(0x1f1a1c, { roughness: 0.85 });
-  const wing = flatMat(0x2A1A1A, { roughness: 0.95, extra: { side: THREE.DoubleSide } });
-  const horn = flatMat(0x0e0a0a, { roughness: 1.0 });
-  const eyeM = emissiveMat(0xFF9A3C, 5);
-  const flameM = emissiveMat(0xFFB347, 6);
-
-  const chest = new THREE.Mesh(new THREE.IcosahedronGeometry(1.8, 2), body);
-  chest.scale.set(1.4, 1.15, 1.6); chest.position.set(0, 0, -1.0); chest.castShadow = true;
-  root.add(chest);
-  const hips = new THREE.Mesh(new THREE.IcosahedronGeometry(1.5, 2), body);
-  hips.scale.set(1.2, 1.0, 1.7); hips.position.set(0, -0.1, 1.3); hips.castShadow = true;
-  root.add(hips);
-  const bellyM = new THREE.Mesh(new THREE.IcosahedronGeometry(1.35, 1), belly);
-  bellyM.scale.set(0.95, 0.55, 2.6); bellyM.position.set(0, -0.85, 0.1);
-  root.add(bellyM);
-
-  const neck = segmentedChain(8, 0.85, 0.45, 3.5, body);
-  neck.position.set(0, 0.55, -2.2); neck.rotation.x = -0.3;
-  root.add(neck);
-
-  const head = new THREE.Mesh(new THREE.IcosahedronGeometry(0.85, 1), body);
-  head.position.set(0, 1.6, -5.5); head.scale.set(1.05, 0.95, 1.5);
-  root.add(head);
-  const jaw = new THREE.Mesh(new THREE.IcosahedronGeometry(0.6, 1), body);
-  jaw.position.set(0, 1.1, -6.0); jaw.scale.set(0.9, 0.5, 1.5);
-  root.add(jaw);
-
-  for (const side of [-1, 1]) {
-    // left horn longer + asymmetric per bible §3
-    const len = side < 0 ? 1.55 : 1.05;
-    const h = new THREE.Mesh(new THREE.ConeGeometry(0.22, len, 6), horn);
-    h.position.set(side * 0.45, 2.0 + (side < 0 ? 0.15 : 0), -5.3);
-    h.rotation.set(-0.7, 0, side * 0.4);
-    root.add(h);
-    if (side < 0) {
-      const notch = new THREE.Mesh(new THREE.TorusGeometry(0.18, 0.04, 4, 6), horn);
-      notch.position.set(side * 0.45, 2.6, -5.3);
-      notch.rotation.x = Math.PI / 2;
-      root.add(notch);
-    }
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.18, 8, 8), eyeM);
-    eye.position.set(side * 0.38, 1.65, -6.0);
-    root.add(eye);
-  }
-
-  const tail = segmentedChain(10, 0.6, 0.12, 5.5, body, false);
-  tail.position.set(0, 0.05, 2.2); tail.rotation.x = 0.18;
-  root.add(tail);
-  const flame = new THREE.Mesh(new THREE.SphereGeometry(0.55, 8, 8), flameM);
-  flame.position.z = 5.7; tail.add(flame);
-
-  const wingL = makeBatWing(-1, wing, horn, 1.0);
-  const wingR = makeBatWing(1, wing, horn, 1.0);
-  wingL.position.set(-1.1, 0.95, -0.8);
-  wingR.position.set(1.1, 0.95, -0.8);
-  root.add(wingL, wingR);
-
-  for (let i = 0; i < 18; i++) {
-    const t = i / 17;
-    const z = -2.5 + t * 8.2;
-    const spike = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.5 - Math.abs(t - 0.4) * 0.35, 4), horn);
-    spike.position.set(0, 1.0 - Math.abs(t - 0.4) * 0.25, z);
-    spike.rotation.x = -0.1;
-    root.add(spike);
-  }
-
-  const mouth = new THREE.Object3D();
-  mouth.position.set(0, 1.25, -6.4);
-  root.add(mouth);
-
-  root.userData = {
-    chest, hips, neck, head, jaw, tail, wingL, wingR, mouth,
-    eyes: eyeM, flame: flameM, bodyMat: body, color: new THREE.Color(0x141014),
-    auraColor: 0xFFB347,
-  };
-  return root;
-}
-
-// ─── ISKARI — fallen house Iskar (storm-blue serpent, lightning eye) ──────
-function buildIskari() {
-  const root = new THREE.Group();
-  const body = flatMat(0x2E4A6B, { roughness: 0.55, metalness: 0.45 });
-  const mane = flatMat(0x5A7090, { roughness: 0.95 });
-  const gold = flatMat(0x8a7a5c, { roughness: 0.6, metalness: 0.55 });
-  const eyeM = emissiveMat(0xF0E68C, 5);
-
-  const SEGS = 26;
-  const segments = [];
-  for (let i = 0; i < SEGS; i++) {
-    const t = i / (SEGS - 1);
-    const r = 0.85 - Math.abs(t - 0.3) * 0.35 - t * 0.15;
-    const seg = new THREE.Mesh(
-      new THREE.SphereGeometry(Math.max(0.12, r), 10, 8),
-      body
-    );
-    seg.scale.z = 1.5;
-    seg.castShadow = true;
-    root.add(seg);
-    segments.push(seg);
-  }
-
-  const head = new THREE.Mesh(new THREE.IcosahedronGeometry(0.95, 1), body);
-  head.scale.set(1.1, 0.85, 1.4);
-  root.add(head);
-
-  const snout = new THREE.Mesh(new THREE.IcosahedronGeometry(0.55, 1), body);
-  snout.scale.set(0.85, 0.65, 1.5);
-  root.add(snout);
-  head.userData.snout = snout;
-
-  const maneBall = new THREE.Mesh(new THREE.IcosahedronGeometry(1.05, 1), mane);
-  maneBall.scale.set(1.3, 1.1, 0.9);
-  root.add(maneBall);
-  head.userData.mane = maneBall;
-
-  for (const side of [-1, 1]) {
-    const antler = new THREE.Group();
-    const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.12, 1.2, 5), gold);
-    stem.position.y = 0.5;
-    stem.rotation.set(-0.4, 0, side * 0.3);
-    antler.add(stem);
-    for (let i = 0; i < 3; i++) {
-      const branch = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.07, 0.55, 5), gold);
-      branch.position.set(side * (0.18 + i * 0.05), 1.0 + i * 0.18, -0.05);
-      branch.rotation.set(-0.6, 0, side * (0.8 + i * 0.2));
-      antler.add(branch);
-    }
-    root.add(antler);
-    head.userData['antler' + (side > 0 ? 'R' : 'L')] = antler;
-
-    const whisker = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.02, 2.2, 5), mane);
-    whisker.rotation.set(0, 0, side * 0.4);
-    root.add(whisker);
-    head.userData['whisker' + (side > 0 ? 'R' : 'L')] = whisker;
-
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.15, 8, 8), eyeM);
-    root.add(eye);
-    head.userData['eye' + (side > 0 ? 'R' : 'L')] = eye;
-  }
-
-  // small vestigial fins instead of wings (for visual punch)
-  const finMat = flatMat(0x2E4A6B, { extra: { side: THREE.DoubleSide } });
-  for (const side of [-1, 1]) {
-    const shape = new THREE.Shape();
-    shape.moveTo(0, 0);
-    shape.lineTo(side * 1.6, 0.6);
-    shape.lineTo(side * 2.2, 0.0);
-    shape.lineTo(side * 1.8, -0.8);
-    shape.lineTo(side * 0.4, -0.4);
-    shape.lineTo(0, 0);
-    const fin = new THREE.Mesh(new THREE.ShapeGeometry(shape), finMat);
-    fin.rotation.x = -Math.PI / 2;
-    root.add(fin);
-    if (side < 0) root.userData.finL = fin;
-    else root.userData.finR = fin;
-  }
-
-  // spine of gold scales
-  for (let i = 0; i < SEGS; i += 1) {
-    const t = i / (SEGS - 1);
-    const fin = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.4 - Math.abs(t - 0.3) * 0.2, 4), gold);
-    fin.userData.seg = i;
-    fin.userData.offset = 0.3 + Math.max(0.1, 0.85 - Math.abs(t - 0.3) * 0.35 - t * 0.15);
-    root.add(fin);
-    segments[i].userData.spineFin = fin;
-  }
-
-  const mouth = new THREE.Object3D();
-  root.add(mouth);
-
-  root.userData = {
-    segments, head, mouth,
-    eyes: eyeM, bodyMat: body,
-    color: new THREE.Color(0x2E4A6B),
-    auraColor: 0xE8F0FF,
-    serpentine: true,
-  };
-  return root;
-}
-
-// ─── VETHRIM — House Brennoc (bark-brown, smoke-breather) ─────────────────
-function buildVethrim() {
-  const root = new THREE.Group();
-  const body = flatMat(0x4A3220, { roughness: 0.75, metalness: 0.1 });
-  const belly = flatMat(0x6B4A30, { roughness: 0.85 });
-  const gold = flatMat(0x3a2818, { roughness: 0.9 });
-  const eyeM = emissiveMat(0xC9A47A, 4);
-
-  const chest = new THREE.Mesh(new THREE.IcosahedronGeometry(1.4, 2), body);
-  chest.scale.set(1.1, 1.0, 1.9); chest.position.set(0, 0, -0.8); chest.castShadow = true;
-  root.add(chest);
-  const hips = new THREE.Mesh(new THREE.IcosahedronGeometry(1.25, 2), body);
-  hips.scale.set(1.05, 0.95, 1.7); hips.position.set(0, -0.05, 1.4); hips.castShadow = true;
-  root.add(hips);
-
-  const neck = segmentedChain(10, 0.7, 0.32, 4.0, body);
-  neck.position.set(0, 0.5, -2.0); neck.rotation.x = -0.25;
-  root.add(neck);
-
-  const head = new THREE.Mesh(new THREE.IcosahedronGeometry(0.7, 1), body);
-  head.position.set(0, 1.65, -5.5); head.scale.set(1.0, 0.9, 1.5);
-  root.add(head);
-  const snout = new THREE.Mesh(new THREE.IcosahedronGeometry(0.45, 1), body);
-  snout.position.set(0, 1.45, -6.2); snout.scale.set(0.85, 0.55, 1.6);
-  root.add(snout);
-
-  for (const side of [-1, 1]) {
-    const h = new THREE.Mesh(new THREE.ConeGeometry(0.15, 0.7, 5), gold);
-    h.position.set(side * 0.3, 2.0, -5.3);
-    h.rotation.set(-0.9, 0, side * 0.25);
-    root.add(h);
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.13, 8, 8), eyeM);
-    eye.position.set(side * 0.3, 1.7, -5.95);
-    root.add(eye);
-  }
-
-  // Frilled plates along spine — earth-tones, bible §3 (Vethrim membrane is frilled not torn)
-  const rainbow = [0x4A3220, 0x3a2818, 0x6B4A30, 0x2e2218, 0x5a3e26, 0x3a2a1a];
-  for (let i = 0; i < 20; i++) {
-    const t = i / 19;
-    const z = -2.5 + t * 9.5;
-    const c = rainbow[i % rainbow.length];
-    const featherMat = flatMat(c, { roughness: 0.5, metalness: 0.25 });
-    const f = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.6 - Math.abs(t - 0.4) * 0.25, 4), featherMat);
-    f.position.set(0, 1.0 - Math.abs(t - 0.4) * 0.3, z);
-    f.rotation.x = -0.2;
-    root.add(f);
-  }
-
-  const tail = segmentedChain(12, 0.55, 0.08, 6.0, body, false);
-  tail.position.set(0, 0.0, 2.4); tail.rotation.x = 0.18;
-  root.add(tail);
-
-  // Feathered wings (multiple flat plates)
-  const wingL = makeFeatheredWing(-1, body, rainbow);
-  const wingR = makeFeatheredWing(1, body, rainbow);
-  wingL.position.set(-0.95, 0.9, -0.7);
-  wingR.position.set(0.95, 0.9, -0.7);
-  root.add(wingL, wingR);
-
-  const mouth = new THREE.Object3D();
-  mouth.position.set(0, 1.3, -6.6);
-  root.add(mouth);
-
-  root.userData = {
-    chest, hips, neck, head, tail, wingL, wingR, mouth,
-    eyes: eyeM, bodyMat: body,
-    color: new THREE.Color(0x4A3220),
-    auraColor: 0x1E1A18,
-  };
-  return root;
-}
-
-function makeFeatheredWing(side, baseMat, rainbow) {
-  const wing = new THREE.Group();
-  const flapPivot = new THREE.Group();
-  wing.add(flapPivot);
-  const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.13, 5.0, 6), baseMat);
-  arm.rotation.z = Math.PI / 2;
-  arm.position.x = side * 2.5;
-  flapPivot.add(arm);
-  const featherCount = 7;
-  for (let i = 0; i < featherCount; i++) {
-    const t = i / (featherCount - 1);
-    const c = rainbow[i % rainbow.length];
-    const fmat = flatMat(c, { roughness: 0.5, metalness: 0.3, extra: { side: THREE.DoubleSide } });
-    const shape = new THREE.Shape();
-    shape.moveTo(0, 0);
-    shape.lineTo(side * 2.5, 0.4);
-    shape.lineTo(side * 3.0, -0.1);
-    shape.lineTo(side * 2.2, -0.5);
-    shape.lineTo(0, -0.2);
-    shape.lineTo(0, 0);
-    const f = new THREE.Mesh(new THREE.ShapeGeometry(shape), fmat);
-    f.rotation.x = -Math.PI / 2;
-    f.position.set(side * (0.5 + t * 4.5), 0, -0.5 + t * 1.0);
-    f.rotation.y = side * (-t * 0.3);
-    flapPivot.add(f);
-  }
-  wing.userData = { flapPivot };
-  return wing;
-}
-
-// ─── SKARN — House Calden (bone-pale, surgical, undefeated) ───────────────
-function buildSkarn() {
-  const root = new THREE.Group();
-  const body = flatMat(0xD8CFC0, { roughness: 0.65, metalness: 0.1 });
-  const crystal = flatMat(0xE8DFCE, {
-    roughness: 0.7, metalness: 0.0,
-    extra: { side: THREE.DoubleSide },
-  });
-  const dark = flatMat(0x8a7a68, { roughness: 0.85, metalness: 0.15 });
-  const eyeM = emissiveMat(0x6FB3C9, 4);
-
-  const chest = new THREE.Mesh(new THREE.IcosahedronGeometry(1.45, 1), body);
-  chest.scale.set(1.05, 0.95, 1.7); chest.position.set(0, 0, -0.9); chest.castShadow = true;
-  root.add(chest);
-  const hips = new THREE.Mesh(new THREE.IcosahedronGeometry(1.15, 1), body);
-  hips.scale.set(1.0, 0.85, 1.6); hips.position.set(0, -0.05, 1.4); hips.castShadow = true;
-  root.add(hips);
-
-  const neck = segmentedChain(11, 0.65, 0.28, 4.2, body);
-  neck.position.set(0, 0.55, -2.2); neck.rotation.x = -0.25;
-  root.add(neck);
-
-  const head = new THREE.Mesh(new THREE.IcosahedronGeometry(0.65, 1), body);
-  head.position.set(0, 1.7, -5.8); head.scale.set(1.0, 0.85, 1.7);
-  root.add(head);
-  const snout = new THREE.Mesh(new THREE.ConeGeometry(0.45, 1.3, 5), body);
-  snout.position.set(0, 1.55, -6.7); snout.rotation.x = Math.PI / 2;
-  root.add(snout);
-
-  for (const side of [-1, 1]) {
-    const h = new THREE.Mesh(new THREE.ConeGeometry(0.2, 1.4, 5), crystal);
-    h.position.set(side * 0.35, 2.05, -5.5);
-    h.rotation.set(-0.5, 0, side * 0.3);
-    root.add(h);
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.14, 8, 8), eyeM);
-    eye.position.set(side * 0.3, 1.78, -6.2);
-    root.add(eye);
-  }
-
-  // Crystal shards growing from back
-  for (let i = 0; i < 14; i++) {
-    const t = i / 13;
-    const z = -2.4 + t * 6.8;
-    const size = 0.5 + Math.random() * 0.5 - Math.abs(t - 0.4) * 0.3;
-    const shard = new THREE.Mesh(new THREE.ConeGeometry(0.25, size, 5), crystal);
-    shard.position.set((Math.random() - 0.5) * 0.5, 1.0, z);
-    shard.rotation.set((Math.random() - 0.5) * 0.4, Math.random() * Math.PI, (Math.random() - 0.5) * 0.4);
-    root.add(shard);
-  }
-
-  const tail = segmentedChain(13, 0.55, 0.07, 6.5, body, false);
-  tail.position.set(0, 0.0, 2.3); tail.rotation.x = 0.2;
-  root.add(tail);
-  const tailShard = new THREE.Mesh(new THREE.ConeGeometry(0.5, 1.6, 5), crystal);
-  tailShard.position.z = 6.5; tailShard.rotation.x = Math.PI / 2;
-  tail.add(tailShard);
-
-  // Crystal facet wings (faceted plates, not membrane)
-  const wingL = makeCrystalWing(-1, dark, crystal);
-  const wingR = makeCrystalWing(1, dark, crystal);
-  wingL.position.set(-1.0, 1.0, -0.7);
-  wingR.position.set(1.0, 1.0, -0.7);
-  root.add(wingL, wingR);
-
-  const mouth = new THREE.Object3D();
-  mouth.position.set(0, 1.45, -7.2);
-  root.add(mouth);
-
-  root.userData = {
-    chest, hips, neck, head, tail, wingL, wingR, mouth,
-    eyes: eyeM, bodyMat: body,
-    color: new THREE.Color(0xD8CFC0),
-    auraColor: 0xB8D8E8,
-  };
-  return root;
-}
-
-function makeCrystalWing(side, boneMat, crystal) {
-  const wing = new THREE.Group();
-  const flapPivot = new THREE.Group();
-  wing.add(flapPivot);
-  const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.1, 4.8, 5), boneMat);
-  arm.rotation.z = Math.PI / 2;
-  arm.position.x = side * 2.4;
-  flapPivot.add(arm);
-  for (let i = 0; i < 5; i++) {
-    const t = i / 4;
-    const c = new THREE.Mesh(new THREE.ConeGeometry(0.4, 2.2 - t * 0.5, 4), crystal);
-    c.position.set(side * (1.2 + t * 0.9), -0.1, t * 1.5);
-    c.rotation.set(Math.PI / 2 + 0.4, 0, side * (Math.PI / 2 + 0.2 + t * 0.15));
-    flapPivot.add(c);
-  }
-  wing.userData = { flapPivot };
-  return wing;
-}
-
-// ─── SHARED WING (BAT) ─────────────────────────────────────────────────────
-function makeBatWing(side, boneMat, darkMat, scale = 1.0) {
-  const wing = new THREE.Group();
-  const flapPivot = new THREE.Group();
-  wing.add(flapPivot);
-  const elbow = new THREE.Group();
-  flapPivot.add(elbow);
-  const humerus = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.12, 2.4 * scale, 6), darkMat);
-  humerus.rotation.z = Math.PI / 2;
-  humerus.position.x = side * 1.2 * scale;
-  flapPivot.add(humerus);
-  elbow.position.x = side * 2.4 * scale;
-  const forearm = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.09, 2.6 * scale, 6), darkMat);
-  forearm.rotation.z = Math.PI / 2;
-  forearm.position.x = side * 1.3 * scale;
-  elbow.add(forearm);
-  const lens = [3.8, 3.2, 2.6, 2.0].map(v => v * scale);
-  const angles = [-0.05, -0.35, -0.7, -1.1];
-  const tips = [];
-  for (let i = 0; i < 4; i++) {
-    const f = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.04, lens[i], 5), darkMat);
-    f.rotation.z = side * (Math.PI / 2 + angles[i] * 0.4);
-    f.position.x = side * (lens[i] / 2);
-    f.rotation.x = angles[i] * 0.4;
-    elbow.add(f);
-    tips.push(new THREE.Vector3(
-      side * (Math.cos(angles[i] * 0.4) * lens[i] + 2.6 * scale),
-      0,
-      Math.sin(angles[i]) * lens[i] * 1.1
-    ));
-  }
-  const shape = new THREE.Shape();
-  shape.moveTo(0, 0);
-  shape.lineTo(side * 2.2 * scale, -0.6);
-  for (const t of tips) shape.lineTo(t.x, t.z);
-  shape.lineTo(side * 0.4 * scale, 1.0);
-  shape.lineTo(0, 0);
-  const membrane = new THREE.Mesh(new THREE.ShapeGeometry(shape), boneMat);
-  membrane.rotation.x = -Math.PI / 2;
-  flapPivot.add(membrane);
-  wing.userData = { flapPivot, elbow };
-  return wing;
-}
-
-// ─── ANIMATION ─────────────────────────────────────────────────────────────
-export function animateDragon(dragon, t, dt, flapBoost = 0) {
-  const u = dragon.userData;
-  if (u.serpentine) animateSerpentine(dragon, t, dt);
-  else animateWinged(dragon, t, dt, flapBoost);
-}
-
-function animateWinged(dragon, t, dt, flapBoost) {
-  const u = dragon.userData;
-  const freq = 1.3 + flapBoost * 1.2;
-  const amp = 0.55 + flapBoost * 0.3;
-  const phase = u.phase + t * freq * Math.PI * 2;
-  const flap = Math.sin(phase);
-  if (u.wingL && u.wingL.userData.flapPivot) {
-    u.wingL.userData.flapPivot.rotation.z = -flap * amp;
-    u.wingR.userData.flapPivot.rotation.z = flap * amp;
-    u.wingL.userData.flapPivot.rotation.y = Math.cos(phase) * 0.18;
-    u.wingR.userData.flapPivot.rotation.y = -Math.cos(phase) * 0.18;
-    if (u.wingL.userData.elbow) {
-      u.wingL.userData.elbow.rotation.y = Math.cos(phase) * 0.25;
-      u.wingR.userData.elbow.rotation.y = -Math.cos(phase) * 0.25;
-    }
-  }
-  if (u.chest) u.chest.position.y = flap * 0.04;
-  if (u.hips) u.hips.position.y = -0.05 + flap * 0.03;
-  if (u.tail) {
-    u.tail.rotation.y = Math.sin(phase * 0.6) * 0.1;
-    u.tail.rotation.x = 0.15 + Math.sin(phase * 0.5) * 0.05;
-  }
-  if (u.flame) u.flame.emissiveIntensity = 5 + Math.sin(t * 8) * 1.5;
-}
-
-function animateSerpentine(dragon, t, dt) {
-  const u = dragon.userData;
-  const segs = u.segments;
-  const phase = u.phase + t * 2.0;
-  const segLen = 0.85;
-  let prev = new THREE.Vector3(0, 0, -segs.length * segLen);
-  for (let i = 0; i < segs.length; i++) {
-    const k = i * 0.28;
-    const wave = Math.sin(phase - k) * 0.3;
-    const yWave = Math.sin(phase * 0.7 - k) * 0.15;
-    const z = -i * segLen;
-    const x = wave * (0.5 + i * 0.05);
-    const y = yWave * (0.5 + i * 0.04);
-    segs[i].position.set(x, y, z);
-    if (segs[i].userData.spineFin) {
-      const f = segs[i].userData.spineFin;
-      f.position.set(x, y + f.userData.offset, z);
-    }
-    if (i === 0) prev = segs[0].position.clone();
-  }
-  // head follows segment 0 forward
-  if (u.head) {
-    const s0 = segs[0].position;
-    u.head.position.set(s0.x, s0.y + 0.2, s0.z - 1.5);
-    if (u.head.userData.snout) u.head.userData.snout.position.set(s0.x, s0.y + 0.15, s0.z - 2.4);
-    if (u.head.userData.mane) u.head.userData.mane.position.set(s0.x, s0.y, s0.z - 0.5);
-    if (u.head.userData.antlerL) u.head.userData.antlerL.position.set(s0.x - 0.3, s0.y + 0.5, s0.z - 1.4);
-    if (u.head.userData.antlerR) u.head.userData.antlerR.position.set(s0.x + 0.3, s0.y + 0.5, s0.z - 1.4);
-    if (u.head.userData.whiskerL) {
-      const w = u.head.userData.whiskerL;
-      w.position.set(s0.x - 0.6, s0.y + 0.1, s0.z - 2.2);
-      w.rotation.z = 0.4 + Math.sin(t * 3) * 0.2;
-    }
-    if (u.head.userData.whiskerR) {
-      const w = u.head.userData.whiskerR;
-      w.position.set(s0.x + 0.6, s0.y + 0.1, s0.z - 2.2);
-      w.rotation.z = -0.4 - Math.sin(t * 3) * 0.2;
-    }
-    if (u.head.userData.eyeL) u.head.userData.eyeL.position.set(s0.x - 0.25, s0.y + 0.3, s0.z - 2.0);
-    if (u.head.userData.eyeR) u.head.userData.eyeR.position.set(s0.x + 0.25, s0.y + 0.3, s0.z - 2.0);
-  }
-  if (dragon.userData.finL) dragon.userData.finL.rotation.z = Math.sin(t * 4) * 0.2;
-  if (dragon.userData.finR) dragon.userData.finR.rotation.z = -Math.sin(t * 4) * 0.2;
-  // mouth = where the head is
-  if (u.mouth) u.mouth.position.set(segs[0].position.x, segs[0].position.y + 0.1, segs[0].position.z - 2.8);
-}
-
-export function setDragonDamage(dragon, frac) {
-  const u = dragon.userData;
-  u.damage = frac;
-  const dark = u.color.clone().multiplyScalar(1 - 0.4 * frac);
-  if (u.bodyMat) u.bodyMat.color.copy(dark);
-}
-
-export function dragonHeadWorld(dragon, out = new THREE.Vector3()) {
-  return dragon.userData.mouth.getWorldPosition(out);
-}
-
-export function dragonForward(dragon, out = new THREE.Vector3()) {
-  out.set(0, 0, -1).applyQuaternion(dragon.quaternion);
+// dragonForward(mesh, outV3) → outV3
+export function dragonForward(group, out) {
+  if (!group || !out) return out ?? new THREE.Vector3();
+  out.set(0, 0, -1).applyQuaternion(group.quaternion);
   return out;
 }

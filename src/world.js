@@ -1,418 +1,562 @@
+// ════════════════════════════════════════════════════════════════════════
+//  REALM — src/world.js
+//  Floating-island scenery: InstancedMesh islands, waterfalls-of-light,
+//  distant sky-creatures (billboards), ambient pollen Points.
+//  Decorative only — NO collision. Zone-tinted terrain palettes.
+//
+//  Legacy shim exports at bottom keep old main.js / populate.js compiling.
+// ════════════════════════════════════════════════════════════════════════
 import * as THREE from 'three';
-import { Sky } from 'three/examples/jsm/objects/Sky.js';
+import {
+  RENDER, ZONES,
+  damp, clamp,
+} from './constants.js';
 
-const PALETTE = {
-  fog:    0xc9a47a,
-  valley: new THREE.Color(0x6b5a3e),
-  moss:   new THREE.Color(0x5a5238),
-  stone:  new THREE.Color(0x4a4238),
-  snow:   new THREE.Color(0xa89a82),
-  castle: 0x2a2622,
-  fire:   0xffb347,
-};
+// ── module-scope temp objects (zero per-frame alloc) ──────────────────
+const _v3a = new THREE.Vector3();
+const _v3b = new THREE.Vector3();
+const _col = new THREE.Color();
+const _col2 = new THREE.Color();
+const _mat4 = new THREE.Matrix4();
+const _quat = new THREE.Quaternion();
+const _euler = new THREE.Euler();
+const _scaleV = new THREE.Vector3();
 
-export function buildWorld(scene, renderer) {
-  scene.fog = new THREE.FogExp2(PALETTE.fog, 0.00028);
-  scene.background = new THREE.Color(PALETTE.fog);
+// ── constants ─────────────────────────────────────────────────────────
+const ISLAND_COUNT = 100;         // InstancedMesh instances
+const CORRIDOR_RADIUS = 42;       // keep clear tube along player path
+const ISLAND_BAND_NEAR = 30;      // min distance island can spawn from player
+const ISLAND_BAND_FAR = RENDER.FAR * 0.82;
+const RECYCLE_DIST = RENDER.FAR * 0.85;
 
-  const sky = makeSky(scene, renderer);
-  const sun = makeSun(scene);
-  scene.add(new THREE.HemisphereLight(0xc9a47a, 0x2b2018, 0.55));
+const POLLEN_COUNT = 300;         // hard ceiling for Points cloud
+const WATERFALL_COUNT = 8;        // vertical additive planes
+const CREATURE_COUNT = 7;         // billboard sky-creatures
 
-  const terrain = makeTerrain();
-  scene.add(terrain.mesh);
-
-  const clouds = makeClouds();
-  scene.add(clouds.group);
-
-  const landmarks = makeLandmarks(terrain);
-  scene.add(landmarks.group);
-
-  return { sky, sun, terrain, clouds, landmarks };
+// ── helpers ────────────────────────────────────────────────────────────
+function seededRand(seed) {
+  // deterministic, fast — avoids Math.random() calls storing arrays
+  let s = seed | 0;
+  s = Math.imul(s ^ (s >>> 16), 0x45d9f3b) | 0;
+  s = Math.imul(s ^ (s >>> 16), 0x45d9f3b) | 0;
+  s = s ^ (s >>> 16);
+  return ((s >>> 0) / 0xffffffff);
 }
 
-function makeSky(scene, renderer) {
-  const sky = new Sky();
-  sky.scale.setScalar(10000);
-  scene.add(sky);
-
-  const u = sky.material.uniforms;
-  u.turbidity.value = 6.0;
-  u.rayleigh.value = 1.8;
-  u.mieCoefficient.value = 0.004;
-  u.mieDirectionalG.value = 0.85;
-
-  const elevation = THREE.MathUtils.degToRad(3);
-  const azimuth = THREE.MathUtils.degToRad(72);
-  const sunDir = new THREE.Vector3().setFromSphericalCoords(
-    1,
-    Math.PI / 2 - elevation,
-    azimuth
-  );
-  u.sunPosition.value.copy(sunDir);
-
-  return { mesh: sky, sunDir };
+function lerpColor(a, b, t, out) {
+  out.r = a.r + (b.r - a.r) * t;
+  out.g = a.g + (b.g - a.g) * t;
+  out.b = a.b + (b.b - a.b) * t;
 }
 
-function makeSun(scene) {
-  const sun = new THREE.DirectionalLight(0xffd27a, 2.2);
-  const elevation = THREE.MathUtils.degToRad(3);
-  const azimuth = THREE.MathUtils.degToRad(72);
-  sun.position.setFromSphericalCoords(2000, Math.PI / 2 - elevation, azimuth);
-  sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
-  sun.shadow.camera.near = 100;
-  sun.shadow.camera.far = 3000;
-  const s = 800;
-  sun.shadow.camera.left = -s;
-  sun.shadow.camera.right = s;
-  sun.shadow.camera.top = s;
-  sun.shadow.camera.bottom = -s;
-  sun.shadow.bias = -0.0005;
-  scene.add(sun);
-  scene.add(sun.target);
-  return sun;
-}
+// ── procedural textures ───────────────────────────────────────────────
 
-function makeTerrain() {
-  const SIZE = 8000;
-  const SEG = 256;
-  const geo = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG);
-  geo.rotateX(-Math.PI / 2);
-
-  const pos = geo.attributes.position;
-  const colors = new Float32Array(pos.count * 3);
-  const heights = new Float32Array(pos.count);
-
-  const c = new THREE.Color();
-  for (let i = 0; i < pos.count; i++) {
-    const x = pos.getX(i);
-    const z = pos.getZ(i);
-    const h = heightAt(x, z);
-    pos.setY(i, h);
-    heights[i] = h;
-    colorForHeight(h, c);
-    colors[i * 3 + 0] = c.r;
-    colors[i * 3 + 1] = c.g;
-    colors[i * 3 + 2] = c.b;
-  }
-  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  geo.computeVertexNormals();
-
-  const mat = new THREE.MeshStandardMaterial({
-    vertexColors: true,
-    flatShading: true,
-    roughness: 0.95,
-    metalness: 0.0,
-  });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.receiveShadow = true;
-
-  return { mesh, heightAt, SIZE };
-}
-
-function fbm(x, z) {
-  let v = 0;
-  let amp = 1;
-  let freq = 1;
-  for (let i = 0; i < 4; i++) {
-    v += amp * pseudoNoise(x * freq, z * freq);
-    freq *= 2.07;
-    amp *= 0.5;
-  }
-  return v;
-}
-
-function pseudoNoise(x, z) {
-  const xi = Math.floor(x);
-  const zi = Math.floor(z);
-  const xf = x - xi;
-  const zf = z - zi;
-  const u = xf * xf * (3 - 2 * xf);
-  const v = zf * zf * (3 - 2 * zf);
-  const n00 = hash2(xi, zi);
-  const n10 = hash2(xi + 1, zi);
-  const n01 = hash2(xi, zi + 1);
-  const n11 = hash2(xi + 1, zi + 1);
-  return lerp(lerp(n00, n10, u), lerp(n01, n11, u), v);
-}
-
-function hash2(x, z) {
-  let n = (x * 374761393 + z * 668265263) | 0;
-  n = (n ^ (n >> 13)) * 1274126177;
-  n = n ^ (n >> 16);
-  return ((n >>> 0) / 4294967295) * 2 - 1;
-}
-
-function lerp(a, b, t) {
-  return a + (b - a) * t;
-}
-
-const CASTLE_POS = new THREE.Vector3(900, 0, -1200);
-const VILLAGE_POS = new THREE.Vector3(-700, 0, 600);
-const STONES_POS = new THREE.Vector3(1400, 0, 1500);
-
-function heightAt(x, z) {
-  const base = fbm(x * 0.0009, z * 0.0009) * 220;
-  const ridges = Math.pow(Math.abs(fbm(x * 0.0003, z * 0.0003)), 0.6) * 480;
-  let h = base + ridges;
-
-  const peakDx = x - CASTLE_POS.x;
-  const peakDz = z - CASTLE_POS.z;
-  const peakD = Math.sqrt(peakDx * peakDx + peakDz * peakDz);
-  const peakBoost = Math.max(0, 1 - peakD / 700);
-  h += peakBoost * peakBoost * 540;
-
-  const vDx = x - VILLAGE_POS.x;
-  const vDz = z - VILLAGE_POS.z;
-  const vD = Math.sqrt(vDx * vDx + vDz * vDz);
-  const valleyDip = Math.max(0, 1 - vD / 350);
-  h -= valleyDip * valleyDip * 220;
-
-  return h;
-}
-
-function colorForHeight(h, out) {
-  if (h < 80) {
-    out.copy(PALETTE.valley);
-  } else if (h < 300) {
-    out.copy(PALETTE.valley).lerp(PALETTE.moss, (h - 80) / 220);
-  } else if (h < 500) {
-    out.copy(PALETTE.moss).lerp(PALETTE.stone, (h - 300) / 200);
-  } else {
-    out.copy(PALETTE.stone).lerp(PALETTE.snow, Math.min(1, (h - 500) / 220));
-  }
-}
-
-function makeClouds() {
-  const group = new THREE.Group();
-  const layers = [];
-  const layerAlts = [380, 400, 420, 440, 460];
-  const cloudTex = makeCloudTexture();
-
-  for (let i = 0; i < layerAlts.length; i++) {
-    const geo = new THREE.PlaneGeometry(9000, 9000, 1, 1);
-    const mat = new THREE.MeshBasicMaterial({
-      map: cloudTex,
-      transparent: true,
-      opacity: 0.55,
-      depthWrite: false,
-      color: 0xfff2dc,
-      fog: true,
-    });
-    const m = new THREE.Mesh(geo, mat);
-    m.rotation.x = -Math.PI / 2;
-    m.position.y = layerAlts[i];
-    m.renderOrder = 1;
-    group.add(m);
-    layers.push({ mesh: m, drift: 0.5 + i * 0.15 });
-  }
-
-  return { group, layers };
-}
-
-function makeCloudTexture() {
-  const N = 512;
+/** Soft radial gradient, centre → transparent edge (waterfall column). */
+function makeWaterfallTexture() {
+  const W = 64, H = 128;
   const canvas = document.createElement('canvas');
-  canvas.width = canvas.height = N;
+  canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext('2d');
-  const img = ctx.createImageData(N, N);
-  for (let y = 0; y < N; y++) {
-    for (let x = 0; x < N; x++) {
-      const fx = x / N * 6;
-      const fy = y / N * 6;
-      let v = 0;
-      v += pseudoNoise(fx, fy) * 0.5;
-      v += pseudoNoise(fx * 2, fy * 2) * 0.25;
-      v += pseudoNoise(fx * 4, fy * 4) * 0.125;
-      v = (v + 1) * 0.5;
-      v = Math.max(0, v - 0.45) * 2.2;
-      v = Math.min(1, v);
-      const i = (y * N + x) * 4;
-      img.data[i + 0] = 255;
-      img.data[i + 1] = 255;
-      img.data[i + 2] = 255;
-      img.data[i + 3] = Math.floor(v * 255);
-    }
-  }
-  ctx.putImageData(img, 0, 0);
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, 'rgba(255,255,255,0.9)');
+  grad.addColorStop(0.55, 'rgba(200,240,255,0.6)');
+  grad.addColorStop(1, 'rgba(180,220,255,0.0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
   const tex = new THREE.CanvasTexture(canvas);
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.repeat.set(3, 3);
-  tex.anisotropy = 4;
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
   return tex;
 }
 
-function makeLandmarks(terrain) {
-  const group = new THREE.Group();
-  group.add(makeCastle(terrain));
-  group.add(makeVillage(terrain));
-  group.add(makeStandingStones(terrain));
-  return { group };
+/** Procedural bird/manta silhouette (simple wing-spread shape). */
+function makeCreatureTexture(seed) {
+  const N = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = N;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, N, N);
+  ctx.fillStyle = 'rgba(180,200,255,0.85)';
+
+  const useManta = seededRand(seed) > 0.5;
+  ctx.beginPath();
+  if (useManta) {
+    // manta / stingray silhouette — swept diamond wings
+    ctx.moveTo(N * 0.5, N * 0.35);
+    ctx.bezierCurveTo(N * 0.05, N * 0.45, N * 0.0, N * 0.6, N * 0.12, N * 0.65);
+    ctx.bezierCurveTo(N * 0.3, N * 0.68, N * 0.44, N * 0.56, N * 0.5, N * 0.52);
+    ctx.bezierCurveTo(N * 0.56, N * 0.56, N * 0.7, N * 0.68, N * 0.88, N * 0.65);
+    ctx.bezierCurveTo(N * 1.0, N * 0.6, N * 0.95, N * 0.45, N * 0.5, N * 0.35);
+    // tail
+    ctx.moveTo(N * 0.5, N * 0.52);
+    ctx.lineTo(N * 0.52, N * 0.78);
+  } else {
+    // bird silhouette — swept-back wings
+    ctx.moveTo(N * 0.5, N * 0.42);
+    ctx.bezierCurveTo(N * 0.38, N * 0.38, N * 0.1, N * 0.32, N * 0.02, N * 0.48);
+    ctx.bezierCurveTo(N * 0.18, N * 0.52, N * 0.38, N * 0.52, N * 0.5, N * 0.5);
+    ctx.bezierCurveTo(N * 0.62, N * 0.52, N * 0.82, N * 0.52, N * 0.98, N * 0.48);
+    ctx.bezierCurveTo(N * 0.9, N * 0.32, N * 0.62, N * 0.38, N * 0.5, N * 0.42);
+    // head
+    ctx.ellipse(N * 0.5, N * 0.39, N * 0.04, N * 0.05, 0, 0, Math.PI * 2);
+  }
+  ctx.fill();
+  const tex = new THREE.CanvasTexture(canvas);
+  return tex;
 }
 
-function makeCastle(terrain) {
-  const g = new THREE.Group();
-  const mat = new THREE.MeshStandardMaterial({
-    color: PALETTE.castle,
-    roughness: 0.9,
-    flatShading: true,
-  });
+/** Soft circular pollen sprite. */
+function makePollenSprite() {
+  const N = 32;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = N;
+  const ctx = canvas.getContext('2d');
+  const grad = ctx.createRadialGradient(N / 2, N / 2, 0, N / 2, N / 2, N / 2);
+  grad.addColorStop(0, 'rgba(255,255,200,1.0)');
+  grad.addColorStop(0.4, 'rgba(255,240,180,0.6)');
+  grad.addColorStop(1, 'rgba(255,220,100,0.0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(N / 2, N / 2, N / 2, 0, Math.PI * 2);
+  ctx.fill();
+  const tex = new THREE.CanvasTexture(canvas);
+  return tex;
+}
 
-  const baseH = 60;
-  const base = new THREE.Mesh(new THREE.BoxGeometry(70, baseH, 70), mat);
-  base.position.y = baseH / 2;
-  base.castShadow = true;
-  g.add(base);
+// ── island geometry ───────────────────────────────────────────────────
+function makeIslandGeo() {
+  // Icosahedron base, scale non-uniformly for chunky slab feel
+  const base = new THREE.IcosahedronGeometry(1, 1);
+  // flatten along Y so it reads as a floating slab
+  const pos = base.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i);
+    pos.setY(i, y * 0.38 + (y < 0 ? -0.15 : 0));
+  }
+  base.computeVertexNormals();
+  return base;
+}
 
-  for (const [dx, dz, h] of [
-    [-30, -30, 90],
-    [30, -30, 70],
-    [-30, 30, 50],
-    [30, 30, 110],
-  ]) {
-    const towerGeo = new THREE.CylinderGeometry(10, 12, h, 8);
-    const tower = new THREE.Mesh(towerGeo, mat);
-    tower.position.set(dx, baseH + h / 2, dz);
-    tower.castShadow = true;
-    g.add(tower);
+// ── per-island state array ─────────────────────────────────────────────
+function makeIslandState(i) {
+  const r = seededRand(i * 137 + 7);
+  const r2 = seededRand(i * 137 + 13);
+  const r3 = seededRand(i * 137 + 19);
+  return {
+    // lateral offsets (baked at recycle)
+    lateralX: (r - 0.5) * 2,   // -1..1 direction (sign + scale applied at recycle)
+    lateralY: r2,               // 0..1
+    lateralZ: r3,               // 0..1
+    scale: 0,
+    colorSeed: r,
+    waterfallIdx: -1,           // which waterfall this island owns (-1 = none)
+    needsMatrix: true,
+  };
+}
 
-    if (h !== 50) {
-      const cap = new THREE.Mesh(
-        new THREE.ConeGeometry(12, 18, 8),
-        mat
-      );
-      cap.position.set(dx, baseH + h + 9, dz);
-      g.add(cap);
-    } else {
-      const rubble = new THREE.Mesh(
-        new THREE.IcosahedronGeometry(10, 0),
-        mat
-      );
-      rubble.position.set(dx + 4, baseH + h + 4, dz - 3);
-      rubble.rotation.set(0.7, 1.2, 0.3);
-      g.add(rubble);
+// ── main factory ──────────────────────────────────────────────────────
+export function makeWorld(scene) {
+
+  // ── zone color caches ──
+  const terrainColA = [new THREE.Color(), new THREE.Color(),
+                       new THREE.Color(), new THREE.Color()];
+  const terrainColB = [new THREE.Color(), new THREE.Color(),
+                       new THREE.Color(), new THREE.Color()];
+
+  function updateZoneColors(zoneData, zoneNext) {
+    for (let i = 0; i < 4; i++) {
+      terrainColA[i].setHex(zoneData.terrain[i]);
+      terrainColB[i].setHex(zoneNext.terrain[i]);
     }
   }
 
-  const h = terrain.heightAt(CASTLE_POS.x, CASTLE_POS.z);
-  g.position.set(CASTLE_POS.x, h - 10, CASTLE_POS.z);
-  return g;
-}
-
-function makeVillage(terrain) {
-  const g = new THREE.Group();
-  const hutMat = new THREE.MeshStandardMaterial({
-    color: 0x3c2a1c,
-    roughness: 0.9,
+  // ── islands ──
+  const islandGeo = makeIslandGeo();
+  const islandMat = new THREE.MeshLambertMaterial({
     flatShading: true,
+    vertexColors: false,
+    color: 0xc8956c,
   });
-  const roofMat = new THREE.MeshStandardMaterial({
-    color: 0x1f1410,
-    roughness: 1.0,
-    flatShading: true,
-  });
-  const emberMat = new THREE.MeshStandardMaterial({
-    color: PALETTE.fire,
-    emissive: PALETTE.fire,
-    emissiveIntensity: 4,
-  });
+  const islandMesh = new THREE.InstancedMesh(islandGeo, islandMat, ISLAND_COUNT);
+  islandMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  islandMesh.frustumCulled = false; // we manage visibility manually
+  scene.add(islandMesh);
 
-  for (let i = 0; i < 9; i++) {
-    const ang = (i / 9) * Math.PI * 2;
-    const r = 40 + Math.random() * 60;
-    const x = Math.cos(ang) * r;
-    const z = Math.sin(ang) * r;
-    const w = 14 + Math.random() * 6;
-    const hh = 8 + Math.random() * 3;
-    const hut = new THREE.Mesh(new THREE.BoxGeometry(w, hh, w), hutMat);
-    hut.position.set(x, hh / 2, z);
-    hut.rotation.y = Math.random() * Math.PI;
-    g.add(hut);
-    const roof = new THREE.Mesh(
-      new THREE.ConeGeometry(w * 0.75, hh * 0.9, 4),
-      roofMat
-    );
-    roof.position.set(x, hh + hh * 0.45, z);
-    roof.rotation.y = hut.rotation.y + Math.PI / 4;
-    g.add(roof);
-    if (i % 2 === 0) {
-      const ember = new THREE.Mesh(
-        new THREE.SphereGeometry(2, 6, 6),
-        emberMat
-      );
-      ember.position.set(x, hh + 2, z);
-      g.add(ember);
-    }
+  // per-island color for InstancedMesh
+  const instanceColors = new Float32Array(ISLAND_COUNT * 3);
+  islandMesh.instanceColor = new THREE.InstancedBufferAttribute(instanceColors, 3);
+
+  const islandStates = Array.from({ length: ISLAND_COUNT }, (_, i) => makeIslandState(i));
+
+  // place islands in a wide band around origin initially
+  function placeIsland(idx, playerPos, forwardHint) {
+    const s = islandStates[idx];
+    const seed = idx * 137 + (Math.floor(playerPos.z * 0.01) | 0);
+    const r1 = seededRand(seed);
+    const r2 = seededRand(seed + 1);
+    const r3 = seededRand(seed + 2);
+    const r4 = seededRand(seed + 3);
+    const r5 = seededRand(seed + 4);
+
+    // distance ahead of player
+    const dist = ISLAND_BAND_NEAR + r1 * (RECYCLE_DIST * 0.7);
+
+    // spread laterally, staying outside corridor tube
+    const angle = r2 * Math.PI * 2;
+    // lateral offset — at least CORRIDOR_RADIUS out
+    const lateral = CORRIDOR_RADIUS + 18 + r3 * 120;
+    const lx = Math.cos(angle) * lateral;
+    const ly = -20 - r4 * 80;     // mostly below the flight path
+    const lz = Math.sin(angle) * lateral * 0.4; // shallower Z spread
+
+    const fwd = forwardHint || _v3b.set(0, 0, -1);
+    _v3a.copy(fwd).multiplyScalar(dist).add(playerPos);
+    _v3a.x += lx;
+    _v3a.y += ly;
+    _v3a.z += lz;
+
+    const sc = 8 + r5 * 28;
+    s.scale = sc;
+
+    _scaleV.set(sc, sc * (0.35 + r4 * 0.2), sc);
+    _euler.set(0, r2 * Math.PI * 2, r3 * 0.15);
+    _quat.setFromEuler(_euler);
+    _mat4.compose(_v3a, _quat, _scaleV);
+    islandMesh.setMatrixAt(idx, _mat4);
+
+    // pick terrain color from zone blend
+    const ti = Math.floor(r5 * 4) & 3;
+    s.colorSeed = r1;
+    lerpColor(terrainColA[ti], terrainColB[ti], 0, _col);
+    instanceColors[idx * 3 + 0] = _col.r;
+    instanceColors[idx * 3 + 1] = _col.g;
+    instanceColors[idx * 3 + 2] = _col.b;
+
+    s.needsMatrix = false;
+    s.worldPos = _v3a.clone(); // cached for waterfall placement
   }
 
-  const fireLight = new THREE.PointLight(PALETTE.fire, 8, 400, 1.2);
-  fireLight.position.y = 30;
-  g.add(fireLight);
-  g.userData.fireLight = fireLight;
-
-  const smokeGeo = new THREE.PlaneGeometry(160, 700);
-  const smokeMat = new THREE.MeshBasicMaterial({
-    color: 0x1a1410,
+  // ── waterfalls-of-light ──
+  const waterfallTex = makeWaterfallTexture();
+  const waterfallMat = new THREE.MeshBasicMaterial({
+    map: waterfallTex,
     transparent: true,
-    opacity: 0.55,
     depthWrite: false,
-    fog: true,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+    color: 0xaaddff,
   });
-  const smoke = new THREE.Mesh(smokeGeo, smokeMat);
-  smoke.position.y = 350;
-  g.add(smoke);
-  g.userData.smoke = smoke;
+  // each waterfall: a simple plane hanging below an island
+  const waterfalls = [];
+  for (let i = 0; i < WATERFALL_COUNT; i++) {
+    const h = 30 + seededRand(i * 31) * 50;
+    const geo = new THREE.PlaneGeometry(4 + seededRand(i * 17) * 6, h);
+    const mesh = new THREE.Mesh(geo, waterfallMat.clone());
+    mesh.visible = false;
+    scene.add(mesh);
+    waterfalls.push({ mesh, uvOffset: 0, speed: 0.6 + seededRand(i * 41) * 0.8 });
+  }
+  // assign waterfalls to every ~12th island
+  for (let i = 0; i < ISLAND_COUNT; i++) {
+    if (i % 13 === 0) {
+      const wIdx = Math.floor(i / 13) % WATERFALL_COUNT;
+      islandStates[i].waterfallIdx = wIdx;
+    }
+  }
 
-  const h = terrain.heightAt(VILLAGE_POS.x, VILLAGE_POS.z);
-  g.position.set(VILLAGE_POS.x, h, VILLAGE_POS.z);
-  return g;
-}
+  // ── distant sky-creatures ──
+  const creatures = [];
+  for (let i = 0; i < CREATURE_COUNT; i++) {
+    const tex = makeCreatureTexture(i * 53);
+    const geo = new THREE.PlaneGeometry(22 + seededRand(i * 17) * 18, 12 + seededRand(i * 37) * 8);
+    const mat = new THREE.MeshBasicMaterial({
+      map: tex,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+      color: 0x99bbff,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    scene.add(mesh);
+    const arcRadius = 180 + seededRand(i * 71) * 220;
+    const arcSpeed = (0.04 + seededRand(i * 83) * 0.07) * (seededRand(i * 97) > 0.5 ? 1 : -1);
+    const arcPhase = seededRand(i * 113) * Math.PI * 2;
+    const arcY = 10 + seededRand(i * 59) * 60;
+    const arcTilt = (seededRand(i * 47) - 0.5) * 0.4;
+    creatures.push({ mesh, arcRadius, arcSpeed, arcPhase, arcY, arcTilt, phase: arcPhase });
+  }
 
-function makeStandingStones(terrain) {
-  const g = new THREE.Group();
-  const mat = new THREE.MeshStandardMaterial({
-    color: 0x2a2a2e,
-    roughness: 0.95,
-    flatShading: true,
+  // ── pollen / ambient debris ──
+  const pollenPositions = new Float32Array(POLLEN_COUNT * 3);
+  const pollenVelocities = new Float32Array(POLLEN_COUNT * 3);
+  const pollenPhases = new Float32Array(POLLEN_COUNT);
+  // initialize with placeholder positions (updated on first frame)
+  for (let i = 0; i < POLLEN_COUNT; i++) {
+    pollenPositions[i * 3 + 0] = (seededRand(i * 7) - 0.5) * 120;
+    pollenPositions[i * 3 + 1] = (seededRand(i * 11) - 0.5) * 60;
+    pollenPositions[i * 3 + 2] = (seededRand(i * 13) - 0.5) * 120;
+    pollenVelocities[i * 3 + 0] = (seededRand(i * 17) - 0.5) * 2;
+    pollenVelocities[i * 3 + 1] = (seededRand(i * 19) - 0.5) * 0.5;
+    pollenVelocities[i * 3 + 2] = (seededRand(i * 23) - 0.5) * 2;
+    pollenPhases[i] = seededRand(i * 29) * Math.PI * 2;
+  }
+  const pollenGeo = new THREE.BufferGeometry();
+  const pollenPosAttr = new THREE.BufferAttribute(pollenPositions, 3);
+  pollenPosAttr.setUsage(THREE.DynamicDrawUsage);
+  pollenGeo.setAttribute('position', pollenPosAttr);
+  const pollenSpriteTex = makePollenSprite();
+  const pollenMat = new THREE.PointsMaterial({
+    map: pollenSpriteTex,
+    size: 1.2,
+    sizeAttenuation: true,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    color: 0xffe29a,
+    opacity: 0.7,
   });
-  const N = 12;
-  const R = 40;
-  for (let i = 0; i < N; i++) {
-    const ang = (i / N) * Math.PI * 2;
-    const x = Math.cos(ang) * R;
-    const z = Math.sin(ang) * R;
-    const h = 14 + Math.random() * 6;
-    const s = new THREE.Mesh(new THREE.BoxGeometry(5, h, 3), mat);
-    s.position.set(x, h / 2, z);
-    s.rotation.set(
-      (Math.random() - 0.5) * 0.2,
-      Math.random() * Math.PI,
-      (Math.random() - 0.5) * 0.2
-    );
-    s.castShadow = true;
-    g.add(s);
+  const pollenPoints = new THREE.Points(pollenGeo, pollenMat);
+  pollenPoints.frustumCulled = false;
+  scene.add(pollenPoints);
+
+  // ── zone color blending state ──
+  let _curZoneIdx = -1;
+  let _initialized = false;
+
+  // temp color objects for zone lerp
+  const _terrainBlend = new THREE.Color();
+  const _accentA = new THREE.Color();
+  const _accentB = new THREE.Color();
+
+  // ─────────────────────────────────────────────────────────────────────
+  function update(dt, ctx) {
+    try {
+      const { time, player, zone } = ctx;
+      const { pos: playerPos, forward } = player;
+      const zoneData = zone.data;
+      const zoneNext = zone.next;
+      const blend = zone.blend;
+
+      // ── zone palette init / update ──
+      if (_curZoneIdx !== zone.index) {
+        _curZoneIdx = zone.index;
+        updateZoneColors(zoneData, zoneNext);
+        _initialized = false;
+      }
+
+      // accent color for pollen / waterfalls
+      _accentA.setHex(zoneData.accent);
+      _accentB.setHex(zoneNext.accent);
+      lerpColor(_accentA, _accentB, blend, _terrainBlend);
+      pollenMat.color.copy(_terrainBlend);
+
+      // ── islands: recycle + color update ──
+      let islandDirty = false;
+      let colorDirty = false;
+
+      for (let i = 0; i < ISLAND_COUNT; i++) {
+        const s = islandStates[i];
+
+        if (!_initialized || s.needsMatrix) {
+          placeIsland(i, playerPos, forward);
+          islandDirty = true;
+          colorDirty = true;
+        } else {
+          // read cached world pos
+          islandMesh.getMatrixAt(i, _mat4);
+          _v3a.setFromMatrixPosition(_mat4);
+
+          const dx = _v3a.x - playerPos.x;
+          const dy = _v3a.y - playerPos.y;
+          const dz = _v3a.z - playerPos.z;
+          const dist2 = dx * dx + dy * dy + dz * dz;
+
+          if (dist2 > RECYCLE_DIST * RECYCLE_DIST) {
+            placeIsland(i, playerPos, forward);
+            islandDirty = true;
+            colorDirty = true;
+          } else {
+            // re-tint to blend zone every ~2s (cheap: only if blend changed noticeably)
+            const ti = Math.floor(s.colorSeed * 4) & 3;
+            lerpColor(terrainColA[ti], terrainColB[ti], blend, _col);
+            instanceColors[i * 3 + 0] = _col.r;
+            instanceColors[i * 3 + 1] = _col.g;
+            instanceColors[i * 3 + 2] = _col.b;
+            colorDirty = true;
+          }
+        }
+      }
+
+      if (!_initialized) _initialized = true;
+
+      if (islandDirty) islandMesh.instanceMatrix.needsUpdate = true;
+      if (colorDirty) {
+        islandMesh.instanceColor.needsUpdate = true;
+        islandMesh.material.vertexColors = true;
+      }
+
+      // ── waterfalls: track island positions, UV scroll ──
+      for (let wi = 0; wi < WATERFALL_COUNT; wi++) {
+        const wf = waterfalls[wi];
+        // find the island that owns this waterfall
+        let found = false;
+        for (let i = 0; i < ISLAND_COUNT; i++) {
+          if (islandStates[i].waterfallIdx !== wi) continue;
+          islandMesh.getMatrixAt(i, _mat4);
+          _v3a.setFromMatrixPosition(_mat4);
+
+          // check visibility distance
+          _v3b.copy(_v3a).sub(playerPos);
+          if (_v3b.lengthSq() > (RECYCLE_DIST * 0.6) * (RECYCLE_DIST * 0.6)) {
+            wf.mesh.visible = false;
+            found = true;
+            break;
+          }
+
+          // hang waterfall below island
+          const scale = islandStates[i].scale || 10;
+          _v3a.y -= scale * 0.18 + 8;
+          wf.mesh.position.copy(_v3a);
+
+          // billboard toward camera (just X rotation isn't needed — it's vertical)
+          wf.mesh.lookAt(ctx.camera.position.x, wf.mesh.position.y, ctx.camera.position.z);
+
+          wf.mesh.visible = true;
+          // UV scroll downward
+          wf.uvOffset = (wf.uvOffset + dt * wf.speed) % 1.0;
+          wf.mesh.material.map.offset.set(0, -wf.uvOffset);
+          wf.mesh.material.map.needsUpdate = false; // CanvasTexture doesn't auto-update
+
+          // tint waterfall to zone accent
+          wf.mesh.material.color.copy(_terrainBlend).lerp(new THREE.Color(0xffffff), 0.5);
+
+          found = true;
+          break;
+        }
+        if (!found) wf.mesh.visible = false;
+      }
+
+      // ── sky-creatures: arc orbits, billboard toward camera ──
+      for (let ci = 0; ci < CREATURE_COUNT; ci++) {
+        const c = creatures[ci];
+        c.phase += c.arcSpeed * dt;
+
+        const cx = playerPos.x + Math.cos(c.phase) * c.arcRadius;
+        const cz = playerPos.z + Math.sin(c.phase) * c.arcRadius;
+        const cy = playerPos.y + c.arcY + Math.sin(c.phase * 0.37 + c.arcTilt) * 15;
+
+        c.mesh.position.set(cx, cy, cz);
+        c.mesh.lookAt(ctx.camera.position);
+
+        // gentle bob opacity
+        const obase = 0.3 + zone.index * 0.12;
+        c.mesh.material.opacity = obase + Math.sin(time * 0.8 + ci) * 0.08;
+
+        // tint creatures by zone (cool blues / teals)
+        _accentA.setHex(zoneData.glow);
+        c.mesh.material.color.copy(_accentA).lerp(new THREE.Color(0xaabbff), 0.5);
+      }
+
+      // ── pollen: drift near player, wrap when far ──
+      const POLLEN_SPREAD = 80;
+      const POLLEN_HALF = POLLEN_SPREAD * 0.5;
+
+      for (let i = 0; i < POLLEN_COUNT; i++) {
+        const pi = i * 3;
+
+        // drift
+        pollenPositions[pi + 0] += pollenVelocities[pi + 0] * dt;
+        pollenPositions[pi + 1] += pollenVelocities[pi + 1] * dt
+          + Math.sin(time * 0.7 + pollenPhases[i]) * 0.4 * dt;
+        pollenPositions[pi + 2] += pollenVelocities[pi + 2] * dt;
+
+        // wrap around player box
+        let wx = playerPos.x + pollenPositions[pi + 0];
+        let wy = playerPos.y + pollenPositions[pi + 1];
+        let wz = playerPos.z + pollenPositions[pi + 2];
+
+        let localX = pollenPositions[pi + 0];
+        let localY = pollenPositions[pi + 1];
+        let localZ = pollenPositions[pi + 2];
+
+        if (localX > POLLEN_HALF) localX -= POLLEN_SPREAD;
+        else if (localX < -POLLEN_HALF) localX += POLLEN_SPREAD;
+        if (localY > POLLEN_HALF * 0.6) localY -= POLLEN_SPREAD * 0.6;
+        else if (localY < -POLLEN_HALF * 0.6) localY += POLLEN_SPREAD * 0.6;
+        if (localZ > POLLEN_HALF) localZ -= POLLEN_SPREAD;
+        else if (localZ < -POLLEN_HALF) localZ += POLLEN_SPREAD;
+
+        pollenPositions[pi + 0] = localX;
+        pollenPositions[pi + 1] = localY;
+        pollenPositions[pi + 2] = localZ;
+      }
+
+      // position the Points group at the player
+      pollenPoints.position.copy(playerPos);
+      pollenPosAttr.needsUpdate = true;
+
+    } catch (_) {
+      // never throw in update
+    }
   }
-  const h = terrain.heightAt(STONES_POS.x, STONES_POS.z);
-  g.position.set(STONES_POS.x, h, STONES_POS.z);
-  return g;
+
+  // ── initial placement ──
+  // called lazily on first update; no-op here
+  // (updateZoneColors will be called once zone.index is known)
+
+  function dispose() {
+    islandGeo.dispose();
+    islandMat.dispose();
+    islandMesh.dispose();
+    scene.remove(islandMesh);
+
+    waterfallTex.dispose();
+    for (const wf of waterfalls) {
+      wf.mesh.geometry.dispose();
+      wf.mesh.material.map?.dispose();
+      wf.mesh.material.dispose();
+      scene.remove(wf.mesh);
+    }
+
+    for (const c of creatures) {
+      c.mesh.geometry.dispose();
+      c.mesh.material.map?.dispose();
+      c.mesh.material.dispose();
+      scene.remove(c.mesh);
+    }
+
+    pollenGeo.dispose();
+    pollenMat.dispose();
+    pollenSpriteTex.dispose();
+    scene.remove(pollenPoints);
+  }
+
+  return { update, dispose };
 }
 
-export function updateWorld(world, dt, t, camera) {
-  for (const layer of world.clouds.layers) {
-    const tex = layer.mesh.material.map;
-    tex.offset.x += dt * 0.005 * layer.drift;
-    tex.offset.y += dt * 0.002 * layer.drift;
-  }
-  const smoke = world.landmarks.group.children[1]?.userData?.smoke;
-  if (smoke) {
-    smoke.lookAt(camera.position.x, smoke.position.y, camera.position.z);
-    smoke.material.opacity = 0.5 + Math.sin(t * 0.8) * 0.08;
-  }
-  const fire = world.landmarks.group.children[1]?.userData?.fireLight;
-  if (fire) {
-    fire.intensity = 7 + Math.sin(t * 6.3) * 1.5 + Math.sin(t * 13.1) * 0.6;
-  }
+// ═══════════════════════════════════════════════════════════════════════
+//  Legacy shim — old main.js and populate.js import these by name.
+//  They are no-ops / stubs so the build stays green while the new
+//  game.js / engine.js wires up makeWorld() instead.
+// ═══════════════════════════════════════════════════════════════════════
+
+export const CASTLE_POS  = new THREE.Vector3(900,  0, -1200);
+export const VILLAGE_POS = new THREE.Vector3(-700, 0,   600);
+export const STONES_POS  = new THREE.Vector3(1400, 0,  1500);
+
+/** Stub buildWorld — returns an empty shell the old main.js can destructure. */
+export function buildWorld(scene) {
+  // Return a shape compatible with old callers (world.terrain.heightAt etc.)
+  const noop = () => 0;
+  const terrain = { heightAt: noop, SIZE: 8000 };
+  const clouds   = { layers: [] };
+  const landmarks = { group: new THREE.Group() };
+  scene.add(landmarks.group);
+  return { terrain, clouds, landmarks };
 }
 
-export { CASTLE_POS, VILLAGE_POS, STONES_POS };
+/** Stub updateWorld — called per-frame by old main.js; safe no-op. */
+export function updateWorld(_world, _dt, _t, _camera) {
+  // no-op
+}
